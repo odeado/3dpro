@@ -1,8 +1,10 @@
-// Service worker minimo: solo lo necesario para que Chrome considere la
-// app "instalable" y para que abra sin red una vez que ya se visito una
-// vez (cachea los archivos propios, no hace falta nada mas sofisticado
-// para este editor).
-const CACHE_NAME = 'editor3d-v1';
+// Service worker: intenta siempre la red primero (para que un push nuevo
+// se vea al toque) y solo si no hay conexion usa lo que tenga guardado en
+// cache -- al reves de "cache primero" (que fue lo que hizo que la version
+// vieja se quedara pegada la primera vez). Cada vez que se cambian estos
+// archivos hay que subir el numero de CACHE_NAME una vez mas, asi el
+// activate() de abajo tira a la basura la cache anterior.
+const CACHE_NAME = 'editor3d-v2';
 const ASSETS = [
   './', './index.html', './main.js',
   './vendor/three.module.js', './vendor/three.core.js',
@@ -25,6 +27,14 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request))
+    fetch(e.request)
+      .then(res => {
+        // Se guarda una copia fresca en cache de paso, para el dia que
+        // se abra sin internet.
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(e.request, copy));
+        return res;
+      })
+      .catch(() => caches.match(e.request))
   );
 });
