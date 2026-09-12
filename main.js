@@ -1208,6 +1208,17 @@ function setActiveQuadrant(q) {
   // cuadrante que no fuera el canvas entero.
   const r = quadrantGLRect(q, wrap.clientWidth, wrap.clientHeight);
   transform.viewport = new THREE.Vector4(r.x, r.y, r.w, r.h);
+  // El gizmo (TransformControls) recalcula la posicion/escala REAL de sus
+  // manijas (la que se usa para detectar el arrastre) recien cuando se lo
+  // renderiza -- eso pasa una vez por cuadro, en el prox requestAnimationFrame.
+  // Si el dedo toca justo el gizmo en el MISMO toque que cambia de
+  // cuadrante (antes de que corra ese proximo cuadro), todavia estaria
+  // calibrado para el cuadrante ANTERIOR y el arrastre fallaria o agarraria
+  // el eje que no es. Se fuerza el recalculo aca mismo, en el momento de
+  // cambiar de cuadrante (este listener corre en fase de captura, ANTES
+  // que TransformControls procese el mismo toque), para que ya este listo.
+  if (transformHelper.parent !== scene) scene.add(transformHelper);
+  transformHelper.updateMatrixWorld();
 }
 
 // OrbitControls calcula cuanto paneas dividiendo el arrastre del dedo por
@@ -1263,17 +1274,40 @@ function handleResize() {
 }
 window.addEventListener('resize', handleResize);
 
+// El gizmo de mover/rotar/escalar (TransformControls) es UN SOLO objeto
+// compartido -- no hay una copia independiente por camara. Su geometria de
+// verdad (la que se usa para detectar el arrastre, no solo como se dibuja)
+// se recalcula cada vez que se lo renderiza, segun la camara que tenga
+// asignada en ESE instante. Si se dibujara en las 4 vistas todas seguidas
+// (como se hacia antes), quedaria calibrado solo para la ULTIMA camara del
+// barrido -- por eso el arrastre solo funcionaba en el cuadrante que
+// justo quedaba al final ("Arriba"), y fallaba en cualquier otro (como
+// "Frente"). La solucion (probada con pruebas automaticas arrastrando el
+// gizmo en los 4 cuadrantes) es sacarlo de la escena mientras se dibujan
+// los otros tres, y devolverlo solo para el cuadrante ACTIVO -- asi su
+// geometria de arrastre nunca se calibra con una camara que no sea esa.
+// Como efecto secundario (bueno): el gizmo ahora se ve solo en el
+// cuadrante activo en vez de en los 4 mal calibrado, lo que de paso deja
+// mas claro en cual se esta trabajando.
 function renderFourView() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
   renderer.setScissorTest(true);
+  const helperWasIn = transformHelper.parent === scene;
+  if (helperWasIn) scene.remove(transformHelper);
   ['tl', 'tr', 'bl', 'br'].forEach(q => {
     const r = quadrantGLRect(q, w, h);
     const cam = GRID_CAMS[q];
     renderer.setViewport(r.x, r.y, r.w, r.h);
     renderer.setScissor(r.x, r.y, r.w, r.h);
-    transform.camera = cam; // asi el gizmo se ve del tamano correcto en cada cuadrante
+    const isActive = q === activeQuadrant;
+    if (isActive && helperWasIn) {
+      transform.camera = cam;
+      scene.add(transformHelper);
+    }
     renderer.render(scene, cam);
+    if (isActive && helperWasIn) scene.remove(transformHelper);
   });
+  if (helperWasIn) scene.add(transformHelper);
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, w, h);
 }
