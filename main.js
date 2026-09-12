@@ -91,8 +91,90 @@ let toolMode = 'translate'; // 'translate' | 'rotate' | 'scale' | 'sculpt'
 
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
-  cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)'
+  cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)',
+  hair: '💇 Pelo'
 };
+
+const HAIR_ROOT_RADIUS = 4;
+const HAIR_TIP_RADIUS = 0.6;
+const HAIR_DEFAULT_COLOR = 0x3b2415;
+const HAIR_MIN_SPACING = 4; // unidades: no agregar un punto nuevo del trazo si esta muy cerca del anterior
+
+// Arma un tubo afinado (grueso en la raiz, fino en la punta) que pasa por
+// "points" -- mismo metodo que usa THREE.TubeGeometry por dentro
+// (computeFrenetFrames para no torcerse), pero con el radio variando a lo
+// largo de la curva en vez de ser fijo, para que se vea como un pelo de
+// verdad y no como un fideo.
+function buildTaperedTubeGeometry(points, rootRadius, tipRadius, radialSegments = 6) {
+  const curve = new THREE.CatmullRomCurve3(points);
+  const segs = Math.max(6, (points.length - 1) * 3);
+  const frames = curve.computeFrenetFrames(segs, false);
+  const vertices = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  const P = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+
+  for (let i = 0; i <= segs; i++) {
+    const u = i / segs;
+    curve.getPointAt(u, P);
+    const N = frames.normals[i];
+    const B = frames.binormals[i];
+    const r = rootRadius + (tipRadius - rootRadius) * u;
+    for (let j = 0; j <= radialSegments; j++) {
+      const v = (j / radialSegments) * Math.PI * 2;
+      const sin = Math.sin(v), cos = -Math.cos(v);
+      normal.set(cos * N.x + sin * B.x, cos * N.y + sin * B.y, cos * N.z + sin * B.z).normalize();
+      normals.push(normal.x, normal.y, normal.z);
+      vertices.push(P.x + r * normal.x, P.y + r * normal.y, P.z + r * normal.z);
+      uvs.push(u, j / radialSegments);
+    }
+  }
+
+  for (let j = 1; j <= segs; j++) {
+    for (let i = 1; i <= radialSegments; i++) {
+      const a = (radialSegments + 1) * (j - 1) + (i - 1);
+      const b = (radialSegments + 1) * j + (i - 1);
+      const c = (radialSegments + 1) * j + i;
+      const d = (radialSegments + 1) * (j - 1) + i;
+      indices.push(a, b, d);
+      indices.push(b, c, d);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setIndex(indices);
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+// Un Pelo no tiene una "forma de fabrica" como un cubo o una esfera -- su
+// geometria sale entera del trazo dibujado. Para poder reconstruirlo (al
+// deshacer/rehacer, abrir un proyecto guardado, o clonarlo) se guarda/
+// restaura el buffer completo (posiciones, normales, uvs, indice), no solo
+// un puñado de parametros.
+function serializeGeometry(geo) {
+  return {
+    position: Array.from(geo.attributes.position.array),
+    normal: Array.from(geo.attributes.normal.array),
+    uv: geo.attributes.uv ? Array.from(geo.attributes.uv.array) : null,
+    index: geo.index ? Array.from(geo.index.array) : null
+  };
+}
+
+function geometryFromSerialized(data) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(data.normal, 3));
+  if (data.uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(data.uv, 2));
+  if (data.index) geo.setIndex(data.index);
+  geo.computeBoundingSphere();
+  return geo;
+}
 
 function geometryFor(kind) {
   switch (kind) {
@@ -111,7 +193,7 @@ function geometryFor(kind) {
 // mismo; para un Nulo, "node" es el grupo vacio que se mueve/rota/escala
 // (y que arrastra con el a todo lo que se agrupe adentro), y "pickMesh" es
 // una esfera invisible mas grande, para poder tocarlo comodo con el dedo.
-function buildObject(kind, colorHex) {
+function buildObject(kind, colorHex, extra) {
   if (kind === 'null') {
     const group = new THREE.Object3D();
     const axes = new THREE.AxesHelper(28);
@@ -122,6 +204,12 @@ function buildObject(kind, colorHex) {
     );
     group.add(hitMesh);
     return { node: group, pickMesh: hitMesh };
+  }
+  if (kind === 'hair') {
+    const geo = extra && extra.geometryData ? geometryFromSerialized(extra.geometryData) : new THREE.BufferGeometry();
+    const mat = new THREE.MeshStandardMaterial({ color: colorHex != null ? colorHex : HAIR_DEFAULT_COLOR, roughness: 0.6, metalness: 0.05, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geo, mat);
+    return { node: mesh, pickMesh: mesh };
   }
   const geo = geometryFor(kind);
   const mat = new THREE.MeshStandardMaterial({ color: colorHex != null ? colorHex : DEFAULT_COLOR, roughness: 0.5, metalness: 0.05 });
@@ -191,11 +279,13 @@ function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
   const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
-  const built = buildObject(src.kind, colorHex);
+  const built = src.kind === 'hair'
+    ? buildObject('hair', colorHex, { geometryData: serializeGeometry(src.mesh.geometry) })
+    : buildObject(src.kind, colorHex);
   built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
-  const copiedSculpt = copySculptIfAny(src, built.node);
+  const copiedSculpt = src.kind === 'hair' ? false : copySculptIfAny(src, built.node);
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
@@ -266,7 +356,7 @@ function selectObject(id) {
   selectedId = id;
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
-    if (toolMode === 'sculpt') transform.detach(); else transform.attach(entry.mesh);
+    if (toolMode === 'sculpt' || toolMode === 'hair') transform.detach(); else transform.attach(entry.mesh);
     if (entry.mesh.material) {
       propsPanel.classList.add('show');
       propsColor.value = '#' + entry.mesh.material.color.getHexString();
@@ -371,10 +461,12 @@ function snapshotScene() {
       sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
       color: e.mesh.material ? e.mesh.material.color.getHex() : null
     };
-    // Solo se guardan los vertices de las figuras que de verdad se
-    // esculpieron -- las demas se reconstruyen con su geometria de
-    // siempre, mas liviano para el historial de deshacer/rehacer.
-    if (e.sculpted && e.mesh.geometry && e.mesh.geometry.attributes.position) {
+    if (e.kind === 'hair' && e.mesh.geometry) {
+      s.hairGeometry = serializeGeometry(e.mesh.geometry);
+    } else if (e.sculpted && e.mesh.geometry && e.mesh.geometry.attributes.position) {
+      // Solo se guardan los vertices de las figuras que de verdad se
+      // esculpieron -- las demas se reconstruyen con su geometria de
+      // siempre, mas liviano para el historial de deshacer/rehacer.
       s.sculptPositions = Array.from(e.mesh.geometry.attributes.position.array);
     }
     return s;
@@ -389,13 +481,15 @@ function rebuildSceneFrom(snap) {
   // Primera pasada: crear todo suelto (a nivel raiz) con su transform local
   // ya cargado.
   snap.forEach(s => {
-    const built = buildObject(s.kind, s.color != null ? s.color : undefined);
+    const built = s.kind === 'hair'
+      ? buildObject('hair', s.color != null ? s.color : undefined, { geometryData: s.hairGeometry })
+      : buildObject(s.kind, s.color != null ? s.color : undefined);
     built.node.position.set(s.px, s.py, s.pz);
     built.node.rotation.set(s.rx, s.ry, s.rz);
     built.node.scale.set(s.sx, s.sy, s.sz);
     built.node.visible = s.visible;
     let sculpted = false;
-    if (s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
+    if (s.kind !== 'hair' && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
         built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
       built.node.geometry.attributes.position.array.set(s.sculptPositions);
       built.node.geometry.attributes.position.needsUpdate = true;
@@ -624,6 +718,89 @@ function sculptRayLocalPoint(entry, clientX, clientY) {
 // geometria) -- se arma una sola vez por geometria y se reusa, para que el
 // pincel de Suavizar sea rapido (promediar solo los vecinos reales, no
 // buscar entre TODOS los vertices cada vez).
+let hairDragging = false;
+let hairPoints = []; // puntos del trazo en curso, en espacio MUNDO
+let hairRefDistance = 200; // profundidad de referencia para cuando el trazo se despega de una superficie
+let pendingHairPoint = null;
+let hairPreviewMesh = null;
+
+function nextHairPoint(clientX, clientY) {
+  const { rect, cam } = getPointerRayContext(clientX, clientY);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const pickable = Array.from(sceneObjects.values()).filter(o => o.visible).map(o => o.pickMesh);
+  const hits = raycaster.intersectObjects(pickable, false);
+  if (hits.length) {
+    hairRefDistance = hits[0].distance;
+    return hits[0].point.clone();
+  }
+  const p = new THREE.Vector3();
+  raycaster.ray.at(hairRefDistance, p);
+  return p;
+}
+
+function clearHairPreview() {
+  if (!hairPreviewMesh) return;
+  scene.remove(hairPreviewMesh);
+  hairPreviewMesh.geometry.dispose();
+  hairPreviewMesh.material.dispose();
+  hairPreviewMesh = null;
+}
+
+function updateHairPreview() {
+  if (hairPoints.length < 2) return;
+  const geo = buildTaperedTubeGeometry(hairPoints, HAIR_ROOT_RADIUS, HAIR_TIP_RADIUS);
+  if (!hairPreviewMesh) {
+    hairPreviewMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: HAIR_DEFAULT_COLOR, roughness: 0.6, side: THREE.DoubleSide }));
+    scene.add(hairPreviewMesh);
+  } else {
+    hairPreviewMesh.geometry.dispose();
+    hairPreviewMesh.geometry = geo;
+  }
+}
+
+function finishHairStroke() {
+  clearHairPreview();
+  if (hairPoints.length < 2) { hairPoints = []; return; } // toque sin arrastre: no crea nada
+  const origin = hairPoints[0].clone();
+  const localPoints = hairPoints.map(p => p.clone().sub(origin));
+  const geo = buildTaperedTubeGeometry(localPoints, HAIR_ROOT_RADIUS, HAIR_TIP_RADIUS);
+  const mat = new THREE.MeshStandardMaterial({ color: HAIR_DEFAULT_COLOR, roughness: 0.6, metalness: 0.05, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(origin);
+  scene.add(mesh);
+  const id = objIdCounter++;
+  mesh.userData.ownerId = id;
+  sceneObjects.set(id, { id, kind: 'hair', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false });
+  hairPoints = [];
+  renderLayerList();
+  selectObject(id);
+  pushHistory();
+}
+
+wrap.addEventListener('pointerdown', (e) => {
+  if (toolMode !== 'hair') return;
+  clearHairPreview();
+  hairPoints = [nextHairPoint(e.clientX, e.clientY)];
+  hairDragging = true;
+  orbit.enabled = false;
+  pendingHairPoint = { clientX: e.clientX, clientY: e.clientY };
+}, { capture: true });
+
+window.addEventListener('pointermove', (e) => {
+  if (!hairDragging) return;
+  pendingHairPoint = { clientX: e.clientX, clientY: e.clientY };
+});
+
+window.addEventListener('pointerup', () => {
+  if (!hairDragging) return;
+  hairDragging = false;
+  pendingHairPoint = null;
+  orbit.enabled = true;
+  finishHairStroke();
+});
+
 function getAdjacency(geometry) {
   let adj = adjacencyCache.get(geometry.uuid);
   if (adj) return adj;
@@ -733,6 +910,7 @@ brushRow.querySelectorAll('.tbtn[data-brush]').forEach(b => {
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (transform.dragging) return;
+  if (toolMode === 'hair') return; // en modo Pelo, tocar dibuja -- no selecciona
   onPick(e.clientX, e.clientY);
 });
 
@@ -756,9 +934,11 @@ function syncCanvasTop() {
 function setMode(mode) {
   toolMode = mode;
   modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-  if (mode === 'sculpt') {
+  if (mode === 'sculpt' || mode === 'hair') {
+    // ninguno de los dos usa el gizmo de mover/rotar/escalar -- Esculpir
+    // deforma con el dedo, Pelo dibuja con el dedo.
     transform.detach();
-    brushRow.style.display = 'flex';
+    brushRow.style.display = mode === 'sculpt' ? 'flex' : 'none';
   } else {
     brushRow.style.display = 'none';
     transform.setMode(mode);
@@ -988,6 +1168,14 @@ function animate() {
     if (entry && entry.kind !== 'null') {
       const local = sculptRayLocalPoint(entry, pendingSculptPoint.clientX, pendingSculptPoint.clientY);
       if (local) applySculptStroke(entry, local, brushType, parseFloat(brushSizeInput.value), parseFloat(brushStrengthInput.value));
+    }
+  }
+  if (hairDragging && pendingHairPoint) {
+    const p = nextHairPoint(pendingHairPoint.clientX, pendingHairPoint.clientY);
+    const last = hairPoints[hairPoints.length - 1];
+    if (!last || last.distanceTo(p) >= HAIR_MIN_SPACING) {
+      hairPoints.push(p);
+      updateHairPreview();
     }
   }
   if (fourViewMode) {
