@@ -47,6 +47,7 @@ const gridTopCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
 let activeCamera = perspCam;
 let fourViewMode = false;
 let currentViewKey = 'perspective';
+let activeQuadrant = 'tl';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -456,8 +457,7 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
 wrap.addEventListener('pointerdown', (e) => {
   if (!fourViewMode) return;
   const q = quadrantAt(e.clientX, e.clientY);
-  const cam = GRID_CAMS[q];
-  if (cam && cam !== activeCamera) useCamera(cam);
+  if (q !== activeQuadrant) setActiveQuadrant(q);
 }, { capture: true });
 
 // --- Botonera de modos (mover / rotar / escalar) ---
@@ -508,6 +508,17 @@ function useCamera(cam) {
   orbit.target.copy(VIEW_TARGET);
   orbit.update();
   transform.camera = cam;
+
+  // Las camaras ortograficas (Frente/Izquierda/Arriba/Atras/Derecha/Abajo)
+  // son vistas "planas" para alinear con precision -- no tiene sentido
+  // poder rotarlas fuera de ese encuadre, si no dejan de servir para eso.
+  // Solo la camara de perspectiva (vista libre) se puede orbitar; en las
+  // demas, arrastrar con un dedo desplaza la vista (pan) en vez de
+  // rotarla, y el pellizco/rueda sigue haciendo zoom igual que antes.
+  const isPersp = (cam === perspCam);
+  orbit.enableRotate = isPersp;
+  orbit.touches.ONE = isPersp ? THREE.TOUCH.ROTATE : THREE.TOUCH.PAN;
+  orbit.mouseButtons.LEFT = isPersp ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
 }
 
 function setView(key) {
@@ -518,6 +529,7 @@ function setView(key) {
   cam.position.set(v.pos[0], v.pos[1], v.pos[2]);
   cam.lookAt(VIEW_TARGET);
 
+  transform.viewport = null;
   useCamera(cam);
   currentViewKey = key;
 
@@ -568,6 +580,35 @@ function quadrantRectDOM(q) {
   return { left, top, width: halfW, height: halfH };
 }
 
+// Mismo rectangulo que quadrantRectDOM pero en el sistema de coordenadas
+// que usan renderer.setViewport/setScissor y TransformControls.viewport:
+// pixeles CSS con origen abajo-izquierda (WebGL), no arriba-izquierda
+// (DOM). Se comparte entre el render de las 4 vistas y el ajuste de
+// TransformControls para que nunca queden desincronizados.
+function quadrantGLRect(q, w, h) {
+  const hw = Math.round(w / 2), hh = Math.round(h / 2);
+  switch (q) {
+    case 'tl': return { x: 0,  y: hh, w: hw,     h: h - hh };
+    case 'tr': return { x: hw, y: hh, w: w - hw, h: h - hh };
+    case 'bl': return { x: 0,  y: 0,  w: hw,     h: hh };
+    default:   return { x: hw, y: 0,  w: w - hw, h: hh }; // 'br'
+  }
+}
+
+function setActiveQuadrant(q) {
+  const cam = GRID_CAMS[q];
+  if (!cam) return;
+  activeQuadrant = q;
+  useCamera(cam);
+  // TransformControls trae de fabrica una propiedad "viewport" pensada
+  // justo para esto (varias camaras compartiendo un canvas con
+  // setViewport/setScissor) -- sin ella, calcula donde toca el dedo usando
+  // el canvas COMPLETO, entonces el gizmo se arrastraba mal en cualquier
+  // cuadrante que no fuera el canvas entero.
+  const r = quadrantGLRect(q, wrap.clientWidth, wrap.clientHeight);
+  transform.viewport = new THREE.Vector4(r.x, r.y, r.w, r.h);
+}
+
 const fourViewBtn = document.getElementById('fourViewBtn');
 fourViewBtn.addEventListener('click', () => {
   fourViewMode = !fourViewMode;
@@ -575,7 +616,7 @@ fourViewBtn.addEventListener('click', () => {
   fourViewBtn.classList.toggle('active', fourViewMode);
   if (fourViewMode) {
     viewButtons.forEach(b => b.classList.remove('active'));
-    useCamera(perspCam);
+    setActiveQuadrant('tl');
   } else {
     setView(currentViewKey);
   }
@@ -599,24 +640,23 @@ function handleResize() {
     cam.updateProjectionMatrix();
   });
   renderer.setSize(w, h);
+  if (fourViewMode) {
+    const r = quadrantGLRect(activeQuadrant, w, h);
+    transform.viewport = new THREE.Vector4(r.x, r.y, r.w, r.h);
+  }
 }
 window.addEventListener('resize', handleResize);
 
 function renderFourView() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
-  const hw = Math.round(w / 2), hh = Math.round(h / 2);
-  const quads = [
-    { cam: perspCam,     x: 0,  y: hh, w: hw,     h: h - hh }, // arriba-izquierda: Perspectiva
-    { cam: gridFrontCam, x: hw, y: hh, w: w - hw, h: h - hh }, // arriba-derecha: Frente
-    { cam: gridLeftCam,  x: 0,  y: 0,  w: hw,     h: hh },     // abajo-izquierda: Izquierda
-    { cam: gridTopCam,   x: hw, y: 0,  w: w - hw, h: hh }      // abajo-derecha: Arriba
-  ];
   renderer.setScissorTest(true);
-  quads.forEach(q => {
-    renderer.setViewport(q.x, q.y, q.w, q.h);
-    renderer.setScissor(q.x, q.y, q.w, q.h);
-    transform.camera = q.cam; // asi el gizmo se ve del tamano correcto en cada cuadrante
-    renderer.render(scene, q.cam);
+  ['tl', 'tr', 'bl', 'br'].forEach(q => {
+    const r = quadrantGLRect(q, w, h);
+    const cam = GRID_CAMS[q];
+    renderer.setViewport(r.x, r.y, r.w, r.h);
+    renderer.setScissor(r.x, r.y, r.w, r.h);
+    transform.camera = cam; // asi el gizmo se ve del tamano correcto en cada cuadrante
+    renderer.render(scene, cam);
   });
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, w, h);
