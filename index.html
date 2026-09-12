@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#e0762f">
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #2b2f33; font-family: system-ui, sans-serif; }
-  #canvasWrap { position: fixed; top: 228px; left: 0; right: 200px; bottom: 0; touch-action: none; }
+  #canvasWrap { position: fixed; top: 284px; left: 0; right: 200px; bottom: 0; touch-action: none; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
   #toolbar {
@@ -19,19 +19,21 @@
     background: rgba(20,22,24,0.9); z-index: 10;
   }
   .row { display: flex; gap: 8px; align-items: center; overflow-x: auto; }
-  .tbtn, .abtn, .hbtn {
+  .tbtn, .abtn, .hbtn, .vbtn {
     font-size: 16px; padding: 12px 10px; white-space: nowrap;
     border: 2px solid #555; border-radius: 12px;
     background: #3a3f44; color: #eee;
     -webkit-tap-highlight-color: transparent;
   }
   .tbtn { flex: 1; max-width: 130px; }
-  .tbtn.active { background: #ffcc33; color: #222; border-color: #ffcc33; }
+  .tbtn.active, .vbtn.active { background: #ffcc33; color: #222; border-color: #ffcc33; }
   .abtn { min-width: 68px; }
-  .abtn:active, .hbtn:active { background: #4a5157; }
+  .vbtn { min-width: 60px; font-size: 14px; padding: 10px 8px; }
+  .abtn:active, .hbtn:active, .vbtn:active { background: #4a5157; }
   .hbtn:disabled { opacity: 0.4; }
   #lightRow { flex: 1; display: flex; align-items: center; gap: 8px; color: #ccc; font-size: 14px; }
   #lightRange { flex: 1; }
+  #viewLabel { color: #ccc; font-size: 14px; white-space: nowrap; }
 
   #layersPanel {
     position: fixed; top: 0; right: 0; bottom: 0; width: 200px;
@@ -95,6 +97,16 @@
       <button class="tbtn" data-mode="translate">↔️ Mover</button>
       <button class="tbtn" data-mode="rotate">🔄 Rotar</button>
       <button class="tbtn" data-mode="scale">↕️ Escalar</button>
+    </div>
+    <div class="row">
+      <span id="viewLabel">🎥 Vista:</span>
+      <button class="vbtn" data-view="perspective">3D</button>
+      <button class="vbtn" data-view="front">Frente</button>
+      <button class="vbtn" data-view="back">Atrás</button>
+      <button class="vbtn" data-view="left">Izquierda</button>
+      <button class="vbtn" data-view="right">Derecha</button>
+      <button class="vbtn" data-view="top">Arriba</button>
+      <button class="vbtn" data-view="bottom">Abajo</button>
     </div>
     <div class="row">
       <button id="undoBtn" class="hbtn" title="Deshacer">↶ Deshacer</button>

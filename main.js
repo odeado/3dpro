@@ -27,8 +27,16 @@ const projectListEmpty = document.getElementById('projectListEmpty');
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2b2f33);
 
-const camera = new THREE.PerspectiveCamera(50, wrap.clientWidth / wrap.clientHeight, 0.1, 2000);
-camera.position.set(180, 160, 260);
+const perspCam = new THREE.PerspectiveCamera(50, wrap.clientWidth / wrap.clientHeight, 0.1, 2000);
+perspCam.position.set(180, 160, 260);
+
+// Camara ortografica para las vistas Frente/Atras/Izquierda/Derecha/Arriba/
+// Abajo -- sin la distorsion de perspectiva, para que sirvan de verdad para
+// alinear cosas ("disenios perfectos"), no solo la vista libre en 3D.
+const ORTHO_HALF_HEIGHT = 220;
+const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
+
+let activeCamera = perspCam;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -46,11 +54,11 @@ scene.add(ambientLight);
 const grid = new THREE.GridHelper(400, 20, 0x555555, 0x3d4146);
 scene.add(grid);
 
-const orbit = new OrbitControls(camera, renderer.domElement);
+const orbit = new OrbitControls(perspCam, renderer.domElement);
 orbit.target.set(0, 20, 0);
 orbit.enableDamping = true;
 
-const transform = new TransformControls(camera, renderer.domElement);
+const transform = new TransformControls(perspCam, renderer.domElement);
 transform.size = 1.3;
 const transformHelper = transform.getHelper ? transform.getHelper() : transform;
 scene.add(transformHelper);
@@ -372,14 +380,14 @@ exportBtn.addEventListener('click', () => {
   grid.visible = false;
   const prevAlpha = renderer.getClearAlpha();
   renderer.setClearColor(0x000000, 0);
-  renderer.render(scene, camera);
+  renderer.render(scene, activeCamera);
 
   const dataUrl = renderer.domElement.toDataURL('image/png');
 
   renderer.setClearColor(0x2b2f33, prevAlpha || 1);
   grid.visible = true;
   if (wasSelected != null) selectObject(wasSelected);
-  renderer.render(scene, camera);
+  renderer.render(scene, activeCamera);
 
   const a = document.createElement('a');
   a.href = dataUrl;
@@ -402,7 +410,7 @@ function onPick(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
+  raycaster.setFromCamera(pointer, activeCamera);
   const pickable = Array.from(sceneObjects.values()).filter(o => o.visible).map(o => o.mesh);
   const hits = raycaster.intersectObjects(pickable, false);
   if (hits.length) {
@@ -427,21 +435,78 @@ function setMode(mode) {
 modeButtons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 setMode('translate');
 
+// --- Vistas de camara (Frente/Atras/Izquierda/Derecha/Arriba/Abajo + 3D) ---
+// "3D" usa la camara de perspectiva de siempre (rotar libre con el dedo).
+// Las otras seis usan la camara ortografica -- sin distorsion de
+// perspectiva, para que sirvan para alinear cosas con precision (por eso
+// las pidio Andres: "diseños perfectos"). Se puede seguir orbitando desde
+// cualquiera de ellas, no quedan bloqueadas; el boton solo las encuadra.
+const VIEW_TARGET = new THREE.Vector3(0, 20, 0);
+const VIEWS = {
+  perspective: { ortho: false, pos: [180, 160, 260], up: [0, 1, 0] },
+  front:       { ortho: true,  pos: [0, 20, 300],   up: [0, 1, 0] },
+  back:        { ortho: true,  pos: [0, 20, -300],  up: [0, 1, 0] },
+  left:        { ortho: true,  pos: [-300, 20, 0],  up: [0, 1, 0] },
+  right:       { ortho: true,  pos: [300, 20, 0],   up: [0, 1, 0] },
+  top:         { ortho: true,  pos: [0, 320, 0.001], up: [0, 0, -1] },
+  bottom:      { ortho: true,  pos: [0, -280, 0.001], up: [0, 0, 1] }
+};
+
+const viewButtons = document.querySelectorAll('.vbtn');
+
+function setView(key) {
+  const v = VIEWS[key];
+  if (!v) return;
+  const cam = v.ortho ? orthoCam : perspCam;
+  cam.up.set(v.up[0], v.up[1], v.up[2]);
+  cam.position.set(v.pos[0], v.pos[1], v.pos[2]);
+  cam.lookAt(VIEW_TARGET);
+
+  activeCamera = cam;
+  orbit.object = cam;
+  // OrbitControls calcula su matematica de orbita en un espacio donde
+  // "arriba" siempre es +Y, usando una rotacion (_quat/_quatInverse) que
+  // arma UNA SOLA VEZ en el constructor a partir del up de la camara
+  // original -- no se recalcula sola si despues le cambiamos el objeto o
+  // el up (como pasa en Arriba/Abajo, que usan un up distinto para no caer
+  // justo en el "polo"). Se rearma a mano ahora, replicando lo mismo que
+  // hace el constructor, para que orbitar desde esas vistas no se sienta
+  // raro/inestable.
+  orbit._quat.setFromUnitVectors(cam.up, new THREE.Vector3(0, 1, 0));
+  orbit._quatInverse.copy(orbit._quat).invert();
+  orbit.target.copy(VIEW_TARGET);
+  orbit.update();
+  transform.camera = cam;
+
+  viewButtons.forEach(b => b.classList.toggle('active', b.dataset.view === key));
+}
+
+viewButtons.forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+
 // --- Resize ---
 function handleResize() {
-  camera.aspect = wrap.clientWidth / wrap.clientHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  const aspect = w / h;
+  perspCam.aspect = aspect;
+  perspCam.updateProjectionMatrix();
+  orthoCam.left = -ORTHO_HALF_HEIGHT * aspect;
+  orthoCam.right = ORTHO_HALF_HEIGHT * aspect;
+  orthoCam.top = ORTHO_HALF_HEIGHT;
+  orthoCam.bottom = -ORTHO_HALF_HEIGHT;
+  orthoCam.updateProjectionMatrix();
+  renderer.setSize(w, h);
 }
 window.addEventListener('resize', handleResize);
 
 function animate() {
   requestAnimationFrame(animate);
   orbit.update();
-  renderer.render(scene, camera);
+  renderer.render(scene, activeCamera);
 }
 animate();
 
+handleResize(); // deja los limites de orthoCam listos antes del primer uso
+setView('perspective');
 pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el principio
 
 // --- PWA: registrar el service worker para que se pueda instalar ---
