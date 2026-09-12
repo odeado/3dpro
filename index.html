@@ -56,6 +56,9 @@
   #lightRow { display: flex; align-items: center; gap: 8px; color: #ccc; font-size: 14px; }
   #lightRange { flex: 1; }
 
+  .brush-slider { display: flex; align-items: center; gap: 6px; color: #ccc; font-size: 12px; white-space: nowrap; }
+  .brush-slider input { width: 70px; }
+
   #layerEmpty { color: #888; font-size: 13px; }
   .layer-row {
     display: flex; align-items: center; gap: 6px;
@@ -127,8 +130,17 @@
       <button class="tbtn" data-mode="translate">↔️ Mover</button>
       <button class="tbtn" data-mode="rotate">🔄 Rotar</button>
       <button class="tbtn" data-mode="scale">↕️ Escalar</button>
+      <button class="tbtn" data-mode="sculpt">🖌️ Esculpir</button>
       <button id="undoBtn" class="hbtn iconbtn" title="Deshacer">↶</button>
       <button id="redoBtn" class="hbtn iconbtn" title="Rehacer">↷</button>
+    </div>
+    <div class="row" id="brushRow" style="display:none;">
+      <button class="tbtn active" data-brush="push">⬆️ Empujar</button>
+      <button class="tbtn" data-brush="pull">⬇️ Hundir</button>
+      <button class="tbtn" data-brush="smooth">🌊 Suavizar</button>
+      <button class="tbtn" data-brush="pinch">🤏 Pellizcar</button>
+      <label class="brush-slider">Tamaño<input id="brushSize" type="range" min="8" max="60" step="1" value="24"></label>
+      <label class="brush-slider">Fuerza<input id="brushStrength" type="range" min="1" max="10" step="1" value="4"></label>
     </div>
   </div>
 
@@ -181,7 +193,7 @@
     </div>
   </div>
 
-  <div id="hint">Tocá una figura o su nombre en la lista para seleccionarla · arrastrá el fondo para orbitar · en Escalar, un solo brazo distorsiona esa figura solo en esa dirección · agregá un 🗂️ Grupo (Nulo), seleccionalo y tocá 🔗 en otras figuras para meterlas adentro: al mover el grupo, se mueven todas juntas</div>
+  <div id="hint">Tocá una figura o su nombre en la lista para seleccionarla · arrastrá el fondo para orbitar · en Escalar, un solo brazo distorsiona esa figura solo en esa dirección · agregá un 🗂️ Grupo (Nulo), seleccionalo y tocá 🔗 en otras figuras para meterlas adentro: al mover el grupo, se mueven todas juntas · en 🖌️ Esculpir, elegí seleccionar la figura y arrastrá el dedo sobre ella para deformarla</div>
 
   <div id="openModal" class="modal-overlay">
     <div class="modal-box">

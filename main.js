@@ -23,6 +23,10 @@ const openModal = document.getElementById('openModal');
 const closeOpenModal = document.getElementById('closeOpenModal');
 const projectListModal = document.getElementById('projectListModal');
 const projectListEmpty = document.getElementById('projectListEmpty');
+const toolbar = document.getElementById('toolbar');
+const brushRow = document.getElementById('brushRow');
+const brushSizeInput = document.getElementById('brushSize');
+const brushStrengthInput = document.getElementById('brushStrength');
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2b2f33);
@@ -83,6 +87,7 @@ const DEFAULT_COLOR = 0xe0762f;
 const sceneObjects = new Map(); // id -> { id, kind, mesh, visible }
 let objIdCounter = 1;
 let selectedId = null;
+let toolMode = 'translate'; // 'translate' | 'rotate' | 'scale' | 'sculpt'
 
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
@@ -91,13 +96,13 @@ const KIND_LABEL = {
 
 function geometryFor(kind) {
   switch (kind) {
-    case 'sphere': return new THREE.SphereGeometry(42, 32, 24);
-    case 'cylinder': return new THREE.CylinderGeometry(36, 36, 78, 32);
-    case 'cone': return new THREE.ConeGeometry(42, 78, 32);
-    case 'plane': return new THREE.PlaneGeometry(90, 90, 1, 1);
-    case 'torus': return new THREE.TorusGeometry(42, 15, 20, 48);
+    case 'sphere': return new THREE.SphereGeometry(42, 48, 36);
+    case 'cylinder': return new THREE.CylinderGeometry(36, 36, 78, 32, 16);
+    case 'cone': return new THREE.ConeGeometry(42, 78, 32, 16);
+    case 'plane': return new THREE.PlaneGeometry(90, 90, 24, 24);
+    case 'torus': return new THREE.TorusGeometry(42, 15, 24, 64);
     case 'cube':
-    default: return new THREE.BoxGeometry(66, 66, 66);
+    default: return new THREE.BoxGeometry(66, 66, 66, 12, 12, 12);
   }
 }
 
@@ -140,7 +145,7 @@ function addPrimitive(kind) {
   scene.add(built.node);
   const id = objIdCounter++;
   built.pickMesh.userData.ownerId = id;
-  sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null });
+  sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false });
   renderLayerList();
   selectObject(id);
   pushHistory();
@@ -170,6 +175,18 @@ function removeObject(id) {
   pushHistory();
 }
 
+function copySculptIfAny(srcEntry, destNode) {
+  if (!srcEntry.sculpted || !srcEntry.mesh.geometry || !destNode.geometry) return false;
+  const srcPos = srcEntry.mesh.geometry.attributes.position;
+  const destPos = destNode.geometry.attributes.position;
+  if (!srcPos || !destPos || srcPos.array.length !== destPos.array.length) return false;
+  destPos.array.set(srcPos.array);
+  destPos.needsUpdate = true;
+  destNode.geometry.computeVertexNormals();
+  destNode.geometry.computeBoundingSphere();
+  return true;
+}
+
 function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
@@ -178,10 +195,11 @@ function cloneObject(id) {
   built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
+  const copiedSculpt = copySculptIfAny(src, built.node);
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -248,7 +266,7 @@ function selectObject(id) {
   selectedId = id;
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
-    transform.attach(entry.mesh);
+    if (toolMode === 'sculpt') transform.detach(); else transform.attach(entry.mesh);
     if (entry.mesh.material) {
       propsPanel.classList.add('show');
       propsColor.value = '#' + entry.mesh.material.color.getHexString();
@@ -345,13 +363,22 @@ let history = [];
 let historyIndex = -1;
 
 function snapshotScene() {
-  return Array.from(sceneObjects.values()).map(e => ({
-    id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
-    px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
-    rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
-    sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
-    color: e.mesh.material ? e.mesh.material.color.getHex() : null
-  }));
+  return Array.from(sceneObjects.values()).map(e => {
+    const s = {
+      id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
+      px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
+      rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
+      sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
+      color: e.mesh.material ? e.mesh.material.color.getHex() : null
+    };
+    // Solo se guardan los vertices de las figuras que de verdad se
+    // esculpieron -- las demas se reconstruyen con su geometria de
+    // siempre, mas liviano para el historial de deshacer/rehacer.
+    if (e.sculpted && e.mesh.geometry && e.mesh.geometry.attributes.position) {
+      s.sculptPositions = Array.from(e.mesh.geometry.attributes.position.array);
+    }
+    return s;
+  });
 }
 
 function rebuildSceneFrom(snap) {
@@ -367,9 +394,18 @@ function rebuildSceneFrom(snap) {
     built.node.rotation.set(s.rx, s.ry, s.rz);
     built.node.scale.set(s.sx, s.sy, s.sz);
     built.node.visible = s.visible;
+    let sculpted = false;
+    if (s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
+        built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
+      built.node.geometry.attributes.position.array.set(s.sculptPositions);
+      built.node.geometry.attributes.position.needsUpdate = true;
+      built.node.geometry.computeVertexNormals();
+      built.node.geometry.computeBoundingSphere();
+      sculpted = true;
+    }
     scene.add(built.node);
     built.pickMesh.userData.ownerId = s.id;
-    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null });
+    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null, sculpted });
     if (s.id > maxId) maxId = s.id;
   });
   // Segunda pasada: aplicar quien esta adentro de que grupo -- usa .add()
@@ -552,10 +588,148 @@ function onPick(clientX, clientY) {
   if (hits.length) {
     const ownerId = hits[0].object.userData.ownerId;
     selectObject(ownerId != null ? ownerId : null);
-  } else {
+  } else if (toolMode !== 'sculpt') {
+    // en modo Esculpir, tocar el fondo es para orbitar y ver otro angulo --
+    // no tiene que deseleccionar la figura que se esta esculpiendo.
     selectObject(null);
   }
 }
+
+// --- Esculpir (empujar / hundir / suavizar / pellizcar la superficie, como
+// un mini-ZBrush) ---
+let brushType = 'push';
+let sculptDragging = false;
+let pendingSculptPoint = null; // ultimo toque recibido, se aplica una vez por frame
+const adjacencyCache = new Map(); // geometry.uuid -> lista de vecinos por vertice (para el pincel de Suavizar)
+
+function getPointerRayContext(clientX, clientY) {
+  if (fourViewMode) {
+    const q = quadrantAt(clientX, clientY);
+    return { rect: quadrantRectDOM(q), cam: GRID_CAMS[q] };
+  }
+  return { rect: renderer.domElement.getBoundingClientRect(), cam: activeCamera };
+}
+
+function sculptRayLocalPoint(entry, clientX, clientY) {
+  const { rect, cam } = getPointerRayContext(clientX, clientY);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const hits = raycaster.intersectObject(entry.mesh, false);
+  if (!hits.length) return null;
+  return entry.mesh.worldToLocal(hits[0].point.clone());
+}
+
+// Vecinos directos de cada vertice (a partir de los triangulos de la
+// geometria) -- se arma una sola vez por geometria y se reusa, para que el
+// pincel de Suavizar sea rapido (promediar solo los vecinos reales, no
+// buscar entre TODOS los vertices cada vez).
+function getAdjacency(geometry) {
+  let adj = adjacencyCache.get(geometry.uuid);
+  if (adj) return adj;
+  const count = geometry.attributes.position.count;
+  adj = new Array(count);
+  for (let i = 0; i < count; i++) adj[i] = new Set();
+  const index = geometry.index;
+  if (index) {
+    const arr = index.array;
+    for (let i = 0; i < arr.length; i += 3) {
+      const a = arr[i], b = arr[i + 1], c = arr[i + 2];
+      adj[a].add(b); adj[a].add(c);
+      adj[b].add(a); adj[b].add(c);
+      adj[c].add(a); adj[c].add(b);
+    }
+  }
+  adjacencyCache.set(geometry.uuid, adj);
+  return adj;
+}
+
+function applySculptStroke(entry, localPoint, brush, size, strength) {
+  const geo = entry.mesh.geometry;
+  const posAttr = geo.attributes.position;
+  const normAttr = geo.attributes.normal;
+  const radius = size;
+
+  if (brush === 'smooth') {
+    const adj = getAdjacency(geo);
+    const original = posAttr.array.slice(); // leer todo antes de escribir nada, para que el promedio no se contamine a mitad de camino
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = original[i * 3], vy = original[i * 3 + 1], vz = original[i * 3 + 2];
+      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > radius) continue;
+      const falloff = 1 - dist / radius;
+      const neighbors = adj[i];
+      if (!neighbors || neighbors.size === 0) continue;
+      let ax = 0, ay = 0, az = 0;
+      neighbors.forEach(n => { ax += original[n * 3]; ay += original[n * 3 + 1]; az += original[n * 3 + 2]; });
+      const cnt = neighbors.size;
+      ax /= cnt; ay /= cnt; az /= cnt;
+      const k = falloff * strength * 0.15;
+      posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
+    }
+  } else {
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
+      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > radius) continue;
+      const t = 1 - dist / radius;
+      const falloff = t * t * (3 - 2 * t); // smoothstep -- borde de pincel mas natural
+
+      if (brush === 'pinch') {
+        const k = falloff * strength * 0.08;
+        posAttr.setXYZ(i, vx + (localPoint.x - vx) * k, vy + (localPoint.y - vy) * k, vz + (localPoint.z - vz) * k);
+      } else {
+        // empujar (afuera) / hundir (adentro): a lo largo de la normal del vertice
+        const nx = normAttr.getX(i), ny = normAttr.getY(i), nz = normAttr.getZ(i);
+        const dir = brush === 'pull' ? -1 : 1;
+        const k = falloff * strength * 0.6 * dir;
+        posAttr.setXYZ(i, vx + nx * k, vy + ny * k, vz + nz * k);
+      }
+    }
+  }
+
+  posAttr.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  entry.sculpted = true;
+}
+
+// Detectar el inicio de un trazo de escultura ANTES de que OrbitControls/
+// TransformControls procesen el mismo toque (mismo truco que ya se usa
+// para el enrutado de cuadrantes en "4 vistas": un listener en fase de
+// "captura" sobre #canvasWrap, un ancestro del canvas).
+wrap.addEventListener('pointerdown', (e) => {
+  if (toolMode !== 'sculpt' || selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind === 'null') return; // un Nulo no tiene superficie para esculpir
+  const local = sculptRayLocalPoint(entry, e.clientX, e.clientY);
+  if (!local) return; // el toque no cayo sobre la figura seleccionada -- que orbite el fondo como siempre
+  sculptDragging = true;
+  orbit.enabled = false;
+  pendingSculptPoint = { clientX: e.clientX, clientY: e.clientY };
+}, { capture: true });
+
+window.addEventListener('pointermove', (e) => {
+  if (!sculptDragging) return;
+  pendingSculptPoint = { clientX: e.clientX, clientY: e.clientY };
+});
+
+window.addEventListener('pointerup', () => {
+  if (!sculptDragging) return;
+  sculptDragging = false;
+  pendingSculptPoint = null;
+  orbit.enabled = true;
+  pushHistory(); // guarda el estado esculpido para poder deshacerlo
+});
+
+brushRow.querySelectorAll('.tbtn[data-brush]').forEach(b => {
+  b.addEventListener('click', () => {
+    brushType = b.dataset.brush;
+    brushRow.querySelectorAll('.tbtn[data-brush]').forEach(bb => bb.classList.toggle('active', bb === b));
+  });
+});
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (transform.dragging) return;
@@ -573,11 +747,27 @@ wrap.addEventListener('pointerdown', (e) => {
   if (q !== activeQuadrant) setActiveQuadrant(q);
 }, { capture: true });
 
-// --- Botonera de modos (mover / rotar / escalar) ---
-const modeButtons = document.querySelectorAll('.tbtn');
+// --- Botonera de modos (mover / rotar / escalar / esculpir) ---
+const modeButtons = document.querySelectorAll('.tbtn[data-mode]');
+function syncCanvasTop() {
+  wrap.style.top = toolbar.offsetHeight + 'px';
+  handleResize();
+}
 function setMode(mode) {
-  transform.setMode(mode);
+  toolMode = mode;
   modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  if (mode === 'sculpt') {
+    transform.detach();
+    brushRow.style.display = 'flex';
+  } else {
+    brushRow.style.display = 'none';
+    transform.setMode(mode);
+    if (selectedId != null) {
+      const entry = sceneObjects.get(selectedId);
+      if (entry) transform.attach(entry.mesh);
+    }
+  }
+  syncCanvasTop();
 }
 modeButtons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 setMode('translate');
@@ -793,6 +983,13 @@ function renderFourView() {
 function animate() {
   requestAnimationFrame(animate);
   orbit.update();
+  if (sculptDragging && pendingSculptPoint && selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && entry.kind !== 'null') {
+      const local = sculptRayLocalPoint(entry, pendingSculptPoint.clientX, pendingSculptPoint.clientY);
+      if (local) applySculptStroke(entry, local, brushType, parseFloat(brushSizeInput.value), parseFloat(brushStrengthInput.value));
+    }
+  }
   if (fourViewMode) {
     renderFourView();
     transform.camera = activeCamera; // deja la camara "activa" lista para el picking/gizmo del cuadrante tocado
@@ -802,7 +999,7 @@ function animate() {
 }
 animate();
 
-handleResize(); // deja los limites de orthoCam listos antes del primer uso
+syncCanvasTop(); // deja el alto del canvas acorde a la barra de arriba (2 o 3 filas) y los limites de orthoCam listos
 setView('perspective');
 pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el principio
 
