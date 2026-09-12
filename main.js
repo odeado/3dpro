@@ -1,7 +1,8 @@
-// Fase 3: color por objeto, luz fija con un slider simple, clonar (en vez
-// de copiar/pegar con portapapeles, un boton "Clonar" hace lo mismo con un
-// solo toque, mas simple para una nena que un menu contextual de touch) y
-// deshacer/rehacer (clave para el desliz de "toque mal y desaparecio todo").
+// Fase 4: guardar/abrir proyectos (localStorage, sin cuenta todavia),
+// exportar imagen PNG transparente, e instalable como PWA (manifest.json +
+// sw.js, registrado al final de este archivo). Se suma tambien el Toroide
+// como forma (util para bocas/ojos: aplastado con Escalar queda como un
+// aro o una media luna).
 
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three-addons/OrbitControls.js';
@@ -15,6 +16,13 @@ const propsColor = document.getElementById('propsColor');
 const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 const lightRange = document.getElementById('lightRange');
+const saveBtn = document.getElementById('saveBtn');
+const openBtn = document.getElementById('openBtn');
+const exportBtn = document.getElementById('exportBtn');
+const openModal = document.getElementById('openModal');
+const closeOpenModal = document.getElementById('closeOpenModal');
+const projectListModal = document.getElementById('projectListModal');
+const projectListEmpty = document.getElementById('projectListEmpty');
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2b2f33);
@@ -22,7 +30,7 @@ scene.background = new THREE.Color(0x2b2f33);
 const camera = new THREE.PerspectiveCamera(50, wrap.clientWidth / wrap.clientHeight, 0.1, 2000);
 camera.position.set(180, 160, 260);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(wrap.clientWidth, wrap.clientHeight);
 wrap.appendChild(renderer.domElement);
@@ -35,7 +43,8 @@ scene.add(dirLight);
 const ambientLight = new THREE.AmbientLight(0xffffff, BASE_AMBIENT_INTENSITY);
 scene.add(ambientLight);
 
-scene.add(new THREE.GridHelper(400, 20, 0x555555, 0x3d4146));
+const grid = new THREE.GridHelper(400, 20, 0x555555, 0x3d4146);
+scene.add(grid);
 
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.target.set(0, 20, 0);
@@ -43,7 +52,8 @@ orbit.enableDamping = true;
 
 const transform = new TransformControls(camera, renderer.domElement);
 transform.size = 1.3;
-scene.add(transform.getHelper ? transform.getHelper() : transform);
+const transformHelper = transform.getHelper ? transform.getHelper() : transform;
+scene.add(transformHelper);
 transform.addEventListener('dragging-changed', (e) => {
   orbit.enabled = !e.value;
   if (!e.value) pushHistory(); // se soltó el gizmo: guardar el estado nuevo para poder deshacerlo
@@ -55,7 +65,10 @@ const sceneObjects = new Map(); // id -> { id, kind, mesh, visible }
 let objIdCounter = 1;
 let selectedId = null;
 
-const KIND_LABEL = { cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro', cone: '🔺 Cono', plane: '▭ Plano' };
+const KIND_LABEL = {
+  cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
+  cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide'
+};
 
 function geometryFor(kind) {
   switch (kind) {
@@ -63,6 +76,7 @@ function geometryFor(kind) {
     case 'cylinder': return new THREE.CylinderGeometry(36, 36, 78, 32);
     case 'cone': return new THREE.ConeGeometry(42, 78, 32);
     case 'plane': return new THREE.PlaneGeometry(90, 90, 1, 1);
+    case 'torus': return new THREE.TorusGeometry(42, 15, 20, 48);
     case 'cube':
     default: return new THREE.BoxGeometry(66, 66, 66);
   }
@@ -103,10 +117,6 @@ function removeObject(id) {
   pushHistory();
 }
 
-// "Clonar" en vez de copiar/pegar con portapapeles: un solo toque duplica
-// la figura ahí mismo, corrida un poco al costado. Para lo que pidió Andres
-// (que su hija pueda repetir una forma) resuelve lo mismo sin necesitar un
-// menú contextual táctil (long-press choca fácil con el orbit de cámara).
 function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
@@ -207,11 +217,6 @@ lightRange.addEventListener('input', () => {
 });
 
 // --- Deshacer / rehacer ---
-// Pila simple de snapshots serializables (posición/rotación/escala/color/
-// visibilidad de cada objeto). Se guarda un snapshot nuevo después de cada
-// acción confirmada (agregar, borrar, clonar, soltar el gizmo, cerrar el
-// selector de color) — nunca en medio de un arrastre, para no inundar el
-// historial con un estado por frame.
 let history = [];
 let historyIndex = -1;
 
@@ -225,7 +230,7 @@ function snapshotScene() {
   }));
 }
 
-function restoreSnapshot(snap) {
+function rebuildSceneFrom(snap) {
   transform.detach();
   sceneObjects.forEach(e => { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh.material.dispose(); });
   sceneObjects.clear();
@@ -247,13 +252,17 @@ function restoreSnapshot(snap) {
   selectedId = null;
   propsPanel.classList.remove('show');
   renderLayerList();
+}
+
+function restoreSnapshot(snap) {
+  rebuildSceneFrom(snap);
   updateHistoryButtons();
 }
 
 function pushHistory() {
   history = history.slice(0, historyIndex + 1);
   history.push(snapshotScene());
-  if (history.length > 60) history.shift(); // tope simple para no crecer sin límite en una sesión larga
+  if (history.length > 60) history.shift();
   historyIndex = history.length - 1;
   updateHistoryButtons();
 }
@@ -277,6 +286,107 @@ window.addEventListener('keydown', (e) => {
   if (!e.ctrlKey && !e.metaKey) return;
   if (e.key === 'z') { e.preventDefault(); undoBtn.click(); }
   if (e.key === 'y') { e.preventDefault(); redoBtn.click(); }
+});
+
+// --- Guardar / abrir proyectos (localStorage, sin cuenta por ahora) ---
+const STORAGE_KEY = 'editor3d_projects';
+
+function loadProjectsMap() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; }
+  catch (e) { return {}; }
+}
+function saveProjectsMap(map) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(map)); }
+  catch (e) { alert('No se pudo guardar (¿memoria del navegador llena?).'); }
+}
+
+function saveProjectAs(name) {
+  const map = loadProjectsMap();
+  map[name] = { savedAt: Date.now(), data: snapshotScene() };
+  saveProjectsMap(map);
+}
+
+function renderProjectListModal() {
+  const map = loadProjectsMap();
+  const names = Object.keys(map).sort((a, b) => (map[b].savedAt || 0) - (map[a].savedAt || 0));
+  projectListModal.innerHTML = '';
+  projectListEmpty.style.display = names.length ? 'none' : 'block';
+  names.forEach(name => {
+    const row = document.createElement('div');
+    row.className = 'proj-row';
+
+    const label = document.createElement('span');
+    label.className = 'proj-name';
+    label.textContent = name;
+    row.appendChild(label);
+
+    const openRowBtn = document.createElement('button');
+    openRowBtn.className = 'layer-btn';
+    openRowBtn.textContent = '📂';
+    openRowBtn.title = 'Abrir';
+    openRowBtn.addEventListener('click', () => {
+      rebuildSceneFrom(map[name].data);
+      // Cargar un proyecto arranca un historial de deshacer nuevo — no
+      // tendría sentido "deshacer" hasta el diseño anterior que ni tiene
+      // que ver con este.
+      history = [snapshotScene()];
+      historyIndex = 0;
+      updateHistoryButtons();
+      openModal.classList.remove('show');
+    });
+    row.appendChild(openRowBtn);
+
+    const delRowBtn = document.createElement('button');
+    delRowBtn.className = 'layer-btn';
+    delRowBtn.textContent = '🗑';
+    delRowBtn.title = 'Borrar guardado';
+    delRowBtn.addEventListener('click', () => {
+      if (!confirm(`¿Borrar "${name}"? No se puede deshacer.`)) return;
+      const m = loadProjectsMap();
+      delete m[name];
+      saveProjectsMap(m);
+      renderProjectListModal();
+    });
+    row.appendChild(delRowBtn);
+
+    projectListModal.appendChild(row);
+  });
+}
+
+saveBtn.addEventListener('click', () => {
+  const name = prompt('¿Cómo se llama este diseño?', 'Mi diseño');
+  if (!name) return;
+  saveProjectAs(name.trim() || 'Mi diseño');
+});
+openBtn.addEventListener('click', () => {
+  renderProjectListModal();
+  openModal.classList.add('show');
+});
+closeOpenModal.addEventListener('click', () => openModal.classList.remove('show'));
+openModal.addEventListener('click', (e) => { if (e.target === openModal) openModal.classList.remove('show'); });
+
+// --- Exportar imagen PNG (fondo transparente, sin grilla ni gizmo) ---
+exportBtn.addEventListener('click', () => {
+  const wasSelected = selectedId;
+  transform.detach();
+  grid.visible = false;
+  const prevAlpha = renderer.getClearAlpha();
+  renderer.setClearColor(0x000000, 0);
+  renderer.render(scene, camera);
+
+  const dataUrl = renderer.domElement.toDataURL('image/png');
+
+  renderer.setClearColor(0x2b2f33, prevAlpha || 1);
+  grid.visible = true;
+  if (wasSelected != null) selectObject(wasSelected);
+  renderer.render(scene, camera);
+
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = `mi-diseno-3d-${Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 });
 
 // --- Botones "Agregar" ---
@@ -333,3 +443,10 @@ function animate() {
 animate();
 
 pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el principio
+
+// --- PWA: registrar el service worker para que se pueda instalar ---
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
