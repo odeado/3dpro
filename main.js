@@ -233,7 +233,7 @@ function addPrimitive(kind) {
   scene.add(built.node);
   const id = objIdCounter++;
   built.pickMesh.userData.ownerId = id;
-  sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false });
+  sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false });
   renderLayerList();
   selectObject(id);
   pushHistory();
@@ -289,7 +289,7 @@ function cloneObject(id) {
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -336,6 +336,72 @@ function depthOf(entry) {
   return d;
 }
 
+// Arma la lista de "raices" (sin padre) y, para cada Nulo, sus hijos
+// directos -- en el orden en que aparecen en sceneObjects (que es el mismo
+// orden que usan moveObject/reordenar). El panel de capas recorre esto en
+// profundidad para que cada figura salga debajo de su grupo, no suelta por
+// ahi solo con sangria.
+function buildTree() {
+  const rootIds = [];
+  const childrenOf = new Map();
+  sceneObjects.forEach(e => {
+    if (e.parentId != null && sceneObjects.has(e.parentId)) {
+      if (!childrenOf.has(e.parentId)) childrenOf.set(e.parentId, []);
+      childrenOf.get(e.parentId).push(e.id);
+    } else {
+      rootIds.push(e.id);
+    }
+  });
+  return { rootIds, childrenOf };
+}
+
+// Sube o baja una figura un lugar entre sus HERMANOS (misma figura padre,
+// o el nivel de arriba de todo si no tiene). El orden se guarda de verdad
+// (no es solo visual): se intercambian las dos posiciones dentro del Map
+// sceneObjects, asi que el nuevo orden sobrevive deshacer/rehacer y
+// guardar el proyecto, porque snapshotScene/rebuildSceneFrom recorren el
+// Map en este mismo orden.
+function moveObject(id, direction) {
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+  const parentKey = entry.parentId != null ? entry.parentId : null;
+  const siblingIds = Array.from(sceneObjects.values())
+    .filter(e => (e.parentId != null ? e.parentId : null) === parentKey)
+    .map(e => e.id);
+  const idx = siblingIds.indexOf(id);
+  const swapWith = siblingIds[idx + direction];
+  if (swapWith == null) return; // ya esta en una punta de la lista
+  const ids = Array.from(sceneObjects.keys());
+  const i = ids.indexOf(id), j = ids.indexOf(swapWith);
+  [ids[i], ids[j]] = [ids[j], ids[i]];
+  const rebuilt = ids.map(k => [k, sceneObjects.get(k)]);
+  sceneObjects.clear();
+  rebuilt.forEach(([k, e]) => sceneObjects.set(k, e));
+  renderLayerList();
+  pushHistory();
+}
+
+function renameObject(id) {
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+  const nombre = window.prompt('Nombre para esta figura:', entry.name || '');
+  if (nombre === null) return; // cancelado
+  entry.name = nombre.trim() ? nombre.trim() : null;
+  renderLayerList();
+  pushHistory();
+}
+
+// Solo es un estado de VISTA del panel (que carpetas estan abiertas o
+// cerradas) -- se guarda igual en el snapshot para que un grupo cerrado
+// siga cerrado despues de deshacer/abrir el proyecto, pero no hace falta
+// meterlo en el historial de deshacer como una accion en si misma.
+function toggleCollapse(id) {
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+  entry.collapsed = !entry.collapsed;
+  renderLayerList();
+}
+
 function toggleVisible(id) {
   const entry = sceneObjects.get(id);
   if (!entry) return;
@@ -376,63 +442,114 @@ function renderLayerList() {
   layerEmpty.style.display = items.length ? 'none' : 'block';
   const selectedEntry = selectedId != null ? sceneObjects.get(selectedId) : null;
   const selectedIsGroup = !!(selectedEntry && selectedEntry.kind === 'null');
+  const { rootIds, childrenOf } = buildTree();
 
-  items.forEach(entry => {
+  // Recorre el arbol en profundidad (cada figura sale justo debajo de su
+  // grupo) en vez de la lista plana de antes -- asi el acordeon (cerrar un
+  // grupo esconde de verdad lo de adentro) tiene sentido.
+  function renderRow(id) {
+    const entry = sceneObjects.get(id);
+    if (!entry) return;
     const row = document.createElement('div');
     row.className = 'layer-row' + (entry.id === selectedId ? ' active' : '') + (entry.kind === 'null' ? ' is-group' : '');
     row.style.marginLeft = (depthOf(entry) * 14) + 'px';
 
+    const top = document.createElement('div');
+    top.className = 'layer-top';
+
+    if (entry.kind === 'null') {
+      const collapseBtn = document.createElement('button');
+      collapseBtn.className = 'collapse-btn';
+      collapseBtn.textContent = entry.collapsed ? '▶' : '▼';
+      collapseBtn.title = entry.collapsed ? 'Mostrar lo de adentro del grupo' : 'Cerrar el grupo (ocultar lo de adentro)';
+      collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleCollapse(entry.id); });
+      top.appendChild(collapseBtn);
+    }
+
     const label = document.createElement('span');
     label.className = 'layer-label';
-    label.textContent = (entry.parentId != null ? '↳ ' : '') + (KIND_LABEL[entry.kind] || entry.kind);
-    row.appendChild(label);
-
-    // Meter esta figura dentro del grupo (Nulo) que este seleccionado --
-    // solo aparece cuando hay un grupo seleccionado y esta fila no es ese
-    // mismo grupo.
-    if (selectedIsGroup && entry.id !== selectedId) {
-      const groupBtn = document.createElement('button');
-      groupBtn.className = 'layer-btn';
-      groupBtn.textContent = '🔗';
-      groupBtn.title = 'Meter en el grupo seleccionado';
-      groupBtn.addEventListener('click', (e) => { e.stopPropagation(); groupInto(entry.id, selectedId); });
-      row.appendChild(groupBtn);
-    }
-
-    // Sacar del grupo (solo aparece si esta figura esta adentro de uno).
-    if (entry.parentId != null) {
-      const ungroupBtn = document.createElement('button');
-      ungroupBtn.className = 'layer-btn';
-      ungroupBtn.textContent = '🔓';
-      ungroupBtn.title = 'Sacar del grupo';
-      ungroupBtn.addEventListener('click', (e) => { e.stopPropagation(); ungroup(entry.id); });
-      row.appendChild(ungroupBtn);
-    }
-
-    const cloneBtn = document.createElement('button');
-    cloneBtn.className = 'layer-btn';
-    cloneBtn.textContent = '📋';
-    cloneBtn.title = 'Clonar';
-    cloneBtn.addEventListener('click', (e) => { e.stopPropagation(); cloneObject(entry.id); });
-    row.appendChild(cloneBtn);
+    label.textContent = (entry.parentId != null ? '↳ ' : '') + (entry.name || KIND_LABEL[entry.kind] || entry.kind);
+    top.appendChild(label);
 
     const eyeBtn = document.createElement('button');
     eyeBtn.className = 'layer-btn';
     eyeBtn.textContent = entry.visible ? '👁' : '🚫';
     eyeBtn.title = entry.visible ? 'Ocultar' : 'Mostrar';
     eyeBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleVisible(entry.id); });
-    row.appendChild(eyeBtn);
+    top.appendChild(eyeBtn);
 
     const delBtn = document.createElement('button');
     delBtn.className = 'layer-btn';
     delBtn.textContent = '🗑';
     delBtn.title = 'Borrar';
     delBtn.addEventListener('click', (e) => { e.stopPropagation(); removeObject(entry.id); });
-    row.appendChild(delBtn);
+    top.appendChild(delBtn);
 
+    row.appendChild(top);
+
+    // Segunda fila: acciones menos frecuentes (orden, nombre, clonar,
+    // agrupar) -- separadas de la primera para que no queden 8 botones
+    // apretados en una sola linea de 220px.
+    const actions = document.createElement('div');
+    actions.className = 'layer-actions';
+
+    const upBtn = document.createElement('button');
+    upBtn.className = 'layer-btn';
+    upBtn.textContent = '⬆️';
+    upBtn.title = 'Subir en la lista';
+    upBtn.addEventListener('click', (e) => { e.stopPropagation(); moveObject(entry.id, -1); });
+    actions.appendChild(upBtn);
+
+    const downBtn = document.createElement('button');
+    downBtn.className = 'layer-btn';
+    downBtn.textContent = '⬇️';
+    downBtn.title = 'Bajar en la lista';
+    downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveObject(entry.id, 1); });
+    actions.appendChild(downBtn);
+
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'layer-btn';
+    renameBtn.textContent = '✏️';
+    renameBtn.title = 'Cambiar nombre';
+    renameBtn.addEventListener('click', (e) => { e.stopPropagation(); renameObject(entry.id); });
+    actions.appendChild(renameBtn);
+
+    const cloneBtn = document.createElement('button');
+    cloneBtn.className = 'layer-btn';
+    cloneBtn.textContent = '📋';
+    cloneBtn.title = 'Clonar';
+    cloneBtn.addEventListener('click', (e) => { e.stopPropagation(); cloneObject(entry.id); });
+    actions.appendChild(cloneBtn);
+
+    if (selectedIsGroup && entry.id !== selectedId) {
+      const groupBtn = document.createElement('button');
+      groupBtn.className = 'layer-btn';
+      groupBtn.textContent = '🔗';
+      groupBtn.title = 'Meter en el grupo seleccionado';
+      groupBtn.addEventListener('click', (e) => { e.stopPropagation(); groupInto(entry.id, selectedId); });
+      actions.appendChild(groupBtn);
+    }
+
+    if (entry.parentId != null) {
+      const ungroupBtn = document.createElement('button');
+      ungroupBtn.className = 'layer-btn';
+      ungroupBtn.textContent = '🔓';
+      ungroupBtn.title = 'Sacar del grupo';
+      ungroupBtn.addEventListener('click', (e) => { e.stopPropagation(); ungroup(entry.id); });
+      actions.appendChild(ungroupBtn);
+    }
+
+    row.appendChild(actions);
     row.addEventListener('click', () => selectObject(entry.id));
     layerList.appendChild(row);
-  });
+
+    if (entry.kind === 'null' && !entry.collapsed) {
+      const kids = childrenOf.get(entry.id) || [];
+      kids.forEach(renderRow);
+    }
+  }
+
+  rootIds.forEach(renderRow);
 }
 
 // --- Color del objeto seleccionado ---
@@ -456,6 +573,7 @@ function snapshotScene() {
   return Array.from(sceneObjects.values()).map(e => {
     const s = {
       id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
+      name: e.name || null, collapsed: !!e.collapsed,
       px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
       rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
       sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
@@ -499,7 +617,7 @@ function rebuildSceneFrom(snap) {
     }
     scene.add(built.node);
     built.pickMesh.userData.ownerId = s.id;
-    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null, sculpted });
+    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null, sculpted, name: s.name || null, collapsed: !!s.collapsed });
     if (s.id > maxId) maxId = s.id;
   });
   // Segunda pasada: aplicar quien esta adentro de que grupo -- usa .add()
@@ -772,7 +890,7 @@ function finishHairStroke() {
   scene.add(mesh);
   const id = objIdCounter++;
   mesh.userData.ownerId = id;
-  sceneObjects.set(id, { id, kind: 'hair', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false });
+  sceneObjects.set(id, { id, kind: 'hair', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false });
   hairPoints = [];
   renderLayerList();
   selectObject(id);
