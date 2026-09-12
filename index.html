@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Spike 3D — gizmo táctil</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #2b2f33; font-family: system-ui, sans-serif; }
+  #canvasWrap { position: fixed; inset: 0; touch-action: none; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #toolbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; gap: 10px; padding: 12px;
+    background: rgba(20,22,24,0.85);
+    z-index: 10;
+  }
+  .tbtn {
+    flex: 1; max-width: 140px;
+    font-size: 18px; padding: 14px 8px;
+    border: 2px solid #555; border-radius: 12px;
+    background: #3a3f44; color: #eee;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tbtn.active { background: #ffcc33; color: #222; border-color: #ffcc33; }
+  #hint {
+    position: fixed; bottom: 10px; left: 0; right: 0; text-align: center;
+    color: #bbb; font-size: 14px; z-index: 10; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <button class="tbtn" data-mode="translate">↔️ Mover</button>
+    <button class="tbtn" data-mode="rotate">🔄 Rotar</button>
+    <button class="tbtn" data-mode="scale">↕️ Escalar</button>
+  </div>
+  <div id="canvasWrap"></div>
+  <div id="hint">Tocá una figura para seleccionarla · arrastrá el fondo para orbitar la cámara</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
