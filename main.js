@@ -86,7 +86,7 @@ let selectedId = null;
 
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
-  cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide'
+  cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)'
 };
 
 function geometryFor(kind) {
@@ -101,6 +101,30 @@ function geometryFor(kind) {
   }
 }
 
+// Crea el Object3D (o Mesh) de una figura, mas el objeto que de verdad se
+// usa para detectar el toque (pickMesh) -- para una figura normal son lo
+// mismo; para un Nulo, "node" es el grupo vacio que se mueve/rota/escala
+// (y que arrastra con el a todo lo que se agrupe adentro), y "pickMesh" es
+// una esfera invisible mas grande, para poder tocarlo comodo con el dedo.
+function buildObject(kind, colorHex) {
+  if (kind === 'null') {
+    const group = new THREE.Object3D();
+    const axes = new THREE.AxesHelper(28);
+    group.add(axes);
+    const hitMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(18, 8, 6),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    group.add(hitMesh);
+    return { node: group, pickMesh: hitMesh };
+  }
+  const geo = geometryFor(kind);
+  const mat = new THREE.MeshStandardMaterial({ color: colorHex != null ? colorHex : DEFAULT_COLOR, roughness: 0.5, metalness: 0.05 });
+  if (kind === 'plane') mat.side = THREE.DoubleSide;
+  const mesh = new THREE.Mesh(geo, mat);
+  return { node: mesh, pickMesh: mesh };
+}
+
 let placeAngle = 0;
 function nextPlacement() {
   const radius = 110;
@@ -110,26 +134,36 @@ function nextPlacement() {
 }
 
 function addPrimitive(kind) {
-  const geo = geometryFor(kind);
-  const mat = new THREE.MeshStandardMaterial({ color: DEFAULT_COLOR, roughness: 0.5, metalness: 0.05 });
-  if (kind === 'plane') mat.side = THREE.DoubleSide;
-  const mesh = new THREE.Mesh(geo, mat);
+  const built = buildObject(kind);
   const pos = nextPlacement();
-  mesh.position.set(pos.x, pos.y, pos.z);
-  scene.add(mesh);
+  built.node.position.set(pos.x, pos.y, pos.z);
+  scene.add(built.node);
   const id = objIdCounter++;
-  sceneObjects.set(id, { id, kind, mesh, visible: true });
+  built.pickMesh.userData.ownerId = id;
+  sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null });
   renderLayerList();
   selectObject(id);
   pushHistory();
 }
 
+function disposeEntry(entry) {
+  entry.mesh.traverse(obj => {
+    if (obj.geometry) obj.geometry.dispose();
+    if (obj.material) obj.material.dispose();
+  });
+}
+
 function removeObject(id) {
   const entry = sceneObjects.get(id);
   if (!entry) return;
+  sceneObjects.forEach(child => {
+    if (child.parentId === id) {
+      scene.attach(child.mesh); // conserva su posicion/rotacion/escala en el mundo
+      child.parentId = null;
+    }
+  });
   scene.remove(entry.mesh);
-  entry.mesh.geometry.dispose();
-  entry.mesh.material.dispose();
+  disposeEntry(entry);
   sceneObjects.delete(id);
   if (selectedId === id) selectObject(null);
   renderLayerList();
@@ -139,18 +173,59 @@ function removeObject(id) {
 function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
-  const geo = src.mesh.geometry.clone();
-  const mat = src.mesh.material.clone();
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
-  mesh.rotation.copy(src.mesh.rotation);
-  mesh.scale.copy(src.mesh.scale);
-  scene.add(mesh);
+  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
+  const built = buildObject(src.kind, colorHex);
+  built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
+  built.node.rotation.copy(src.mesh.rotation);
+  built.node.scale.copy(src.mesh.scale);
+  scene.add(built.node);
   const newId = objIdCounter++;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh, visible: true });
+  built.pickMesh.userData.ownerId = newId;
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null });
   renderLayerList();
   selectObject(newId);
   pushHistory();
+}
+
+// --- Agrupar / desagrupar (el Nulo funciona como "mango": lo que se mete
+// adentro se mueve/rota/escala junto con el cuando se transforma el Nulo) ---
+function isDescendantOf(candidateId, ancestorId) {
+  let cur = sceneObjects.get(candidateId);
+  let guard = 0;
+  while (cur && cur.parentId != null && guard++ < 50) {
+    if (cur.parentId === ancestorId) return true;
+    cur = sceneObjects.get(cur.parentId);
+  }
+  return false;
+}
+
+function groupInto(childId, parentId) {
+  const child = sceneObjects.get(childId);
+  const parent = sceneObjects.get(parentId);
+  if (!child || !parent || childId === parentId) return;
+  if (isDescendantOf(parentId, childId)) return; // no meter un grupo dentro de si mismo
+  parent.mesh.attach(child.mesh); // conserva su posicion/rotacion/escala en el mundo
+  child.parentId = parentId;
+  renderLayerList();
+  pushHistory();
+}
+
+function ungroup(id) {
+  const entry = sceneObjects.get(id);
+  if (!entry || entry.parentId == null) return;
+  scene.attach(entry.mesh); // conserva su posicion/rotacion/escala en el mundo
+  entry.parentId = null;
+  renderLayerList();
+  pushHistory();
+}
+
+function depthOf(entry) {
+  let d = 0, cur = entry, guard = 0;
+  while (cur && cur.parentId != null && guard++ < 50) {
+    d++;
+    cur = sceneObjects.get(cur.parentId);
+  }
+  return d;
 }
 
 function toggleVisible(id) {
@@ -165,7 +240,7 @@ function toggleVisible(id) {
 
 function setColor(id, hex) {
   const entry = sceneObjects.get(id);
-  if (!entry) return;
+  if (!entry || !entry.mesh.material) return;
   entry.mesh.material.color.set(hex);
 }
 
@@ -174,8 +249,12 @@ function selectObject(id) {
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
     transform.attach(entry.mesh);
-    propsPanel.classList.add('show');
-    propsColor.value = '#' + entry.mesh.material.color.getHexString();
+    if (entry.mesh.material) {
+      propsPanel.classList.add('show');
+      propsColor.value = '#' + entry.mesh.material.color.getHexString();
+    } else {
+      propsPanel.classList.remove('show');
+    }
   } else {
     transform.detach();
     propsPanel.classList.remove('show');
@@ -187,14 +266,40 @@ function renderLayerList() {
   layerList.innerHTML = '';
   const items = Array.from(sceneObjects.values());
   layerEmpty.style.display = items.length ? 'none' : 'block';
+  const selectedEntry = selectedId != null ? sceneObjects.get(selectedId) : null;
+  const selectedIsGroup = !!(selectedEntry && selectedEntry.kind === 'null');
+
   items.forEach(entry => {
     const row = document.createElement('div');
-    row.className = 'layer-row' + (entry.id === selectedId ? ' active' : '');
+    row.className = 'layer-row' + (entry.id === selectedId ? ' active' : '') + (entry.kind === 'null' ? ' is-group' : '');
+    row.style.marginLeft = (depthOf(entry) * 14) + 'px';
 
     const label = document.createElement('span');
     label.className = 'layer-label';
-    label.textContent = KIND_LABEL[entry.kind] || entry.kind;
+    label.textContent = (entry.parentId != null ? '↳ ' : '') + (KIND_LABEL[entry.kind] || entry.kind);
     row.appendChild(label);
+
+    // Meter esta figura dentro del grupo (Nulo) que este seleccionado --
+    // solo aparece cuando hay un grupo seleccionado y esta fila no es ese
+    // mismo grupo.
+    if (selectedIsGroup && entry.id !== selectedId) {
+      const groupBtn = document.createElement('button');
+      groupBtn.className = 'layer-btn';
+      groupBtn.textContent = '🔗';
+      groupBtn.title = 'Meter en el grupo seleccionado';
+      groupBtn.addEventListener('click', (e) => { e.stopPropagation(); groupInto(entry.id, selectedId); });
+      row.appendChild(groupBtn);
+    }
+
+    // Sacar del grupo (solo aparece si esta figura esta adentro de uno).
+    if (entry.parentId != null) {
+      const ungroupBtn = document.createElement('button');
+      ungroupBtn.className = 'layer-btn';
+      ungroupBtn.textContent = '🔓';
+      ungroupBtn.title = 'Sacar del grupo';
+      ungroupBtn.addEventListener('click', (e) => { e.stopPropagation(); ungroup(entry.id); });
+      row.appendChild(ungroupBtn);
+    }
 
     const cloneBtn = document.createElement('button');
     cloneBtn.className = 'layer-btn';
@@ -241,31 +346,39 @@ let historyIndex = -1;
 
 function snapshotScene() {
   return Array.from(sceneObjects.values()).map(e => ({
-    id: e.id, kind: e.kind, visible: e.visible,
+    id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
     px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
     rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
     sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
-    color: e.mesh.material.color.getHex()
+    color: e.mesh.material ? e.mesh.material.color.getHex() : null
   }));
 }
 
 function rebuildSceneFrom(snap) {
   transform.detach();
-  sceneObjects.forEach(e => { scene.remove(e.mesh); e.mesh.geometry.dispose(); e.mesh.material.dispose(); });
+  sceneObjects.forEach(e => { scene.remove(e.mesh); disposeEntry(e); });
   sceneObjects.clear();
   let maxId = 0;
+  // Primera pasada: crear todo suelto (a nivel raiz) con su transform local
+  // ya cargado.
   snap.forEach(s => {
-    const geo = geometryFor(s.kind);
-    const mat = new THREE.MeshStandardMaterial({ color: s.color, roughness: 0.5, metalness: 0.05 });
-    if (s.kind === 'plane') mat.side = THREE.DoubleSide;
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(s.px, s.py, s.pz);
-    mesh.rotation.set(s.rx, s.ry, s.rz);
-    mesh.scale.set(s.sx, s.sy, s.sz);
-    mesh.visible = s.visible;
-    scene.add(mesh);
-    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh, visible: s.visible });
+    const built = buildObject(s.kind, s.color != null ? s.color : undefined);
+    built.node.position.set(s.px, s.py, s.pz);
+    built.node.rotation.set(s.rx, s.ry, s.rz);
+    built.node.scale.set(s.sx, s.sy, s.sz);
+    built.node.visible = s.visible;
+    scene.add(built.node);
+    built.pickMesh.userData.ownerId = s.id;
+    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null });
     if (s.id > maxId) maxId = s.id;
+  });
+  // Segunda pasada: aplicar quien esta adentro de que grupo -- usa .add()
+  // (no .attach()) porque el transform local ya es el correcto, guardado
+  // tal cual en el paso anterior.
+  sceneObjects.forEach(e => {
+    if (e.parentId != null && sceneObjects.has(e.parentId)) {
+      sceneObjects.get(e.parentId).mesh.add(e.mesh);
+    }
   });
   objIdCounter = maxId + 1;
   selectedId = null;
@@ -434,11 +547,11 @@ function onPick(clientX, clientY) {
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, cam);
-  const pickable = Array.from(sceneObjects.values()).filter(o => o.visible).map(o => o.mesh);
+  const pickable = Array.from(sceneObjects.values()).filter(o => o.visible).map(o => o.pickMesh);
   const hits = raycaster.intersectObjects(pickable, false);
   if (hits.length) {
-    const hitEntry = Array.from(sceneObjects.values()).find(o => o.mesh === hits[0].object);
-    selectObject(hitEntry ? hitEntry.id : null);
+    const ownerId = hits[0].object.userData.ownerId;
+    selectObject(ownerId != null ? ownerId : null);
   } else {
     selectObject(null);
   }
@@ -608,6 +721,21 @@ function setActiveQuadrant(q) {
   const r = quadrantGLRect(q, wrap.clientWidth, wrap.clientHeight);
   transform.viewport = new THREE.Vector4(r.x, r.y, r.w, r.h);
 }
+
+// OrbitControls calcula cuanto paneas dividiendo el arrastre del dedo por
+// el ANCHO/ALTO COMPLETO del canvas (asume que la camara siempre llena toda
+// la pantalla). En el modo "4 vistas" cada camara solo dibuja en un cuarto
+// del canvas, asi que sin corregir esto el paneo queda mucho mas duro/lento
+// de lo que se ve en pantalla (a veces ni se nota que se movio). Se "parcha"
+// _pan (metodo privado, pero accesible, mismo truco que ya se usa con
+// _quat/_quatInverse) para escalarlo segun el tamano real del cuadrante
+// activo.
+const orbitPanOriginal = orbit._pan.bind(orbit);
+orbit._pan = function (deltaX, deltaY) {
+  if (!fourViewMode) { orbitPanOriginal(deltaX, deltaY); return; }
+  const r = quadrantGLRect(activeQuadrant, wrap.clientWidth, wrap.clientHeight);
+  orbitPanOriginal(deltaX * (wrap.clientWidth / r.w), deltaY * (wrap.clientHeight / r.h));
+};
 
 const fourViewBtn = document.getElementById('fourViewBtn');
 fourViewBtn.addEventListener('click', () => {
