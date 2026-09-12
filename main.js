@@ -36,7 +36,17 @@ perspCam.position.set(180, 160, 260);
 const ORTHO_HALF_HEIGHT = 220;
 const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
 
+// Camaras fijas para el modo "4 vistas a la vez" (como Cinema4D): a
+// diferencia de orthoCam (que se reposiciona segun la vista elegida en modo
+// de una sola vista), estas quedan quietas en Frente/Izquierda/Arriba para
+// que las cuatro vistas se vean todas juntas y a la vez.
+const gridFrontCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
+const gridLeftCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
+const gridTopCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 3000);
+
 let activeCamera = perspCam;
+let fourViewMode = false;
+let currentViewKey = 'perspective';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -378,6 +388,10 @@ exportBtn.addEventListener('click', () => {
   const wasSelected = selectedId;
   transform.detach();
   grid.visible = false;
+  // Si estabamos en modo "4 vistas" el renderer quedo con scissor/viewport
+  // de un cuadrante -- para exportar la imagen completa hay que resetearlo.
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, wrap.clientWidth, wrap.clientHeight);
   const prevAlpha = renderer.getClearAlpha();
   renderer.setClearColor(0x000000, 0);
   renderer.render(scene, activeCamera);
@@ -407,10 +421,18 @@ const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 
 function onPick(clientX, clientY) {
-  const rect = renderer.domElement.getBoundingClientRect();
+  let rect, cam;
+  if (fourViewMode) {
+    const q = quadrantAt(clientX, clientY);
+    rect = quadrantRectDOM(q);
+    cam = GRID_CAMS[q];
+  } else {
+    rect = renderer.domElement.getBoundingClientRect();
+    cam = activeCamera;
+  }
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, activeCamera);
+  raycaster.setFromCamera(pointer, cam);
   const pickable = Array.from(sceneObjects.values()).filter(o => o.visible).map(o => o.mesh);
   const hits = raycaster.intersectObjects(pickable, false);
   if (hits.length) {
@@ -425,6 +447,18 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   if (transform.dragging) return;
   onPick(e.clientX, e.clientY);
 });
+
+// En modo "4 vistas", antes de que OrbitControls/TransformControls procesen
+// el mismo toque hay que decidir a que camara (cuadrante) corresponde --
+// por eso este listener va en la fase de "captura" sobre #canvasWrap (un
+// ancestro del canvas), que se dispara ANTES de que el evento llegue al
+// canvas donde estan enganchados esos controles.
+wrap.addEventListener('pointerdown', (e) => {
+  if (!fourViewMode) return;
+  const q = quadrantAt(e.clientX, e.clientY);
+  const cam = GRID_CAMS[q];
+  if (cam && cam !== activeCamera) useCamera(cam);
+}, { capture: true });
 
 // --- Botonera de modos (mover / rotar / escalar) ---
 const modeButtons = document.querySelectorAll('.tbtn');
@@ -454,14 +488,11 @@ const VIEWS = {
 
 const viewButtons = document.querySelectorAll('.vbtn');
 
-function setView(key) {
-  const v = VIEWS[key];
-  if (!v) return;
-  const cam = v.ortho ? orthoCam : perspCam;
-  cam.up.set(v.up[0], v.up[1], v.up[2]);
-  cam.position.set(v.pos[0], v.pos[1], v.pos[2]);
-  cam.lookAt(VIEW_TARGET);
-
+// Reasigna la camara "activa" (la que usan el orbitado, el gizmo y la
+// seleccion por toque) -- centraliza el ajuste del _quat/_quatInverse de
+// OrbitControls que antes vivia solo dentro de setView(), para poder
+// reusarlo tambien cuando se cambia de cuadrante en modo "4 vistas".
+function useCamera(cam) {
   activeCamera = cam;
   orbit.object = cam;
   // OrbitControls calcula su matematica de orbita en un espacio donde
@@ -477,11 +508,78 @@ function setView(key) {
   orbit.target.copy(VIEW_TARGET);
   orbit.update();
   transform.camera = cam;
+}
+
+function setView(key) {
+  const v = VIEWS[key];
+  if (!v) return;
+  const cam = v.ortho ? orthoCam : perspCam;
+  cam.up.set(v.up[0], v.up[1], v.up[2]);
+  cam.position.set(v.pos[0], v.pos[1], v.pos[2]);
+  cam.lookAt(VIEW_TARGET);
+
+  useCamera(cam);
+  currentViewKey = key;
 
   viewButtons.forEach(b => b.classList.toggle('active', b.dataset.view === key));
 }
 
-viewButtons.forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+viewButtons.forEach(b => b.addEventListener('click', () => {
+  if (fourViewMode) {
+    fourViewMode = false;
+    wrap.classList.remove('four-view');
+    fourViewBtn.classList.remove('active');
+  }
+  setView(b.dataset.view);
+}));
+
+// --- Modo "4 vistas a la vez" (como Cinema4D): Perspectiva / Frente /
+// Izquierda / Arriba, todas dibujadas juntas en un solo canvas dividido en
+// cuatro. Las camaras de Frente/Izquierda/Arriba quedan fijas (no son las
+// mismas que usa el boton de una sola vista); tocar dentro de un cuadrante
+// hace que ese pase a ser el "activo" para orbitar/seleccionar/mover.
+function setupGridCam(cam, viewKey) {
+  const v = VIEWS[viewKey];
+  cam.up.set(v.up[0], v.up[1], v.up[2]);
+  cam.position.set(v.pos[0], v.pos[1], v.pos[2]);
+  cam.lookAt(VIEW_TARGET);
+}
+setupGridCam(gridFrontCam, 'front');
+setupGridCam(gridLeftCam, 'left');
+setupGridCam(gridTopCam, 'top');
+
+const GRID_CAMS = { tl: perspCam, tr: gridFrontCam, bl: gridLeftCam, br: gridTopCam };
+
+function quadrantAt(clientX, clientY) {
+  const rect = wrap.getBoundingClientRect();
+  const isRight = (clientX - rect.left) >= rect.width / 2;
+  const isBottom = (clientY - rect.top) >= rect.height / 2;
+  if (!isRight && !isBottom) return 'tl';
+  if (isRight && !isBottom) return 'tr';
+  if (!isRight && isBottom) return 'bl';
+  return 'br';
+}
+
+function quadrantRectDOM(q) {
+  const rect = wrap.getBoundingClientRect();
+  const halfW = rect.width / 2, halfH = rect.height / 2;
+  const left = (q === 'tr' || q === 'br') ? rect.left + halfW : rect.left;
+  const top = (q === 'bl' || q === 'br') ? rect.top + halfH : rect.top;
+  return { left, top, width: halfW, height: halfH };
+}
+
+const fourViewBtn = document.getElementById('fourViewBtn');
+fourViewBtn.addEventListener('click', () => {
+  fourViewMode = !fourViewMode;
+  wrap.classList.toggle('four-view', fourViewMode);
+  fourViewBtn.classList.toggle('active', fourViewMode);
+  if (fourViewMode) {
+    viewButtons.forEach(b => b.classList.remove('active'));
+    useCamera(perspCam);
+  } else {
+    setView(currentViewKey);
+  }
+});
 
 // --- Resize ---
 function handleResize() {
@@ -489,19 +587,50 @@ function handleResize() {
   const aspect = w / h;
   perspCam.aspect = aspect;
   perspCam.updateProjectionMatrix();
-  orthoCam.left = -ORTHO_HALF_HEIGHT * aspect;
-  orthoCam.right = ORTHO_HALF_HEIGHT * aspect;
-  orthoCam.top = ORTHO_HALF_HEIGHT;
-  orthoCam.bottom = -ORTHO_HALF_HEIGHT;
-  orthoCam.updateProjectionMatrix();
+  // Los cuadrantes del modo "4 vistas" miden la mitad de ancho y la mitad
+  // de alto que el canvas completo, asi que conservan el mismo aspect --
+  // por eso orthoCam y las tres camaras fijas de la grilla usan el mismo
+  // calculo de encuadre.
+  [orthoCam, gridFrontCam, gridLeftCam, gridTopCam].forEach(cam => {
+    cam.left = -ORTHO_HALF_HEIGHT * aspect;
+    cam.right = ORTHO_HALF_HEIGHT * aspect;
+    cam.top = ORTHO_HALF_HEIGHT;
+    cam.bottom = -ORTHO_HALF_HEIGHT;
+    cam.updateProjectionMatrix();
+  });
   renderer.setSize(w, h);
 }
 window.addEventListener('resize', handleResize);
 
+function renderFourView() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  const hw = Math.round(w / 2), hh = Math.round(h / 2);
+  const quads = [
+    { cam: perspCam,     x: 0,  y: hh, w: hw,     h: h - hh }, // arriba-izquierda: Perspectiva
+    { cam: gridFrontCam, x: hw, y: hh, w: w - hw, h: h - hh }, // arriba-derecha: Frente
+    { cam: gridLeftCam,  x: 0,  y: 0,  w: hw,     h: hh },     // abajo-izquierda: Izquierda
+    { cam: gridTopCam,   x: hw, y: 0,  w: w - hw, h: hh }      // abajo-derecha: Arriba
+  ];
+  renderer.setScissorTest(true);
+  quads.forEach(q => {
+    renderer.setViewport(q.x, q.y, q.w, q.h);
+    renderer.setScissor(q.x, q.y, q.w, q.h);
+    transform.camera = q.cam; // asi el gizmo se ve del tamano correcto en cada cuadrante
+    renderer.render(scene, q.cam);
+  });
+  renderer.setScissorTest(false);
+  renderer.setViewport(0, 0, w, h);
+}
+
 function animate() {
   requestAnimationFrame(animate);
   orbit.update();
-  renderer.render(scene, activeCamera);
+  if (fourViewMode) {
+    renderFourView();
+    transform.camera = activeCamera; // deja la camara "activa" lista para el picking/gizmo del cuadrante tocado
+  } else {
+    renderer.render(scene, activeCamera);
+  }
 }
 animate();
 
