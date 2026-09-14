@@ -3345,6 +3345,19 @@ if (arrayMode) {
 if (arrayCloneBtn) {
   arrayCloneBtn.addEventListener('click', () => {
     if (selectedId == null) return;
+    // Si la figura elegida ya es el Clonador, su original, o una de sus
+    // copias, NO hay que crear un Clonador nuevo encima (quedaria uno
+    // anidado adentro del otro, duplicando figuras sin querer) -- hay que
+    // llevar al usuario al que YA existe, que se edita en vivo (cantidad,
+    // separacion, radio, modo) desde la pestaña Atributos.
+    const existing = getActiveCloner();
+    if (existing) {
+      if (existing.id !== selectedId) selectObject(existing.id);
+      const attrTabBtn = document.querySelector('.tab-btn[data-tab="tabAttributes"]');
+      if (attrTabBtn) attrTabBtn.click();
+      alert('Esta figura ya tiene un Clonador aplicado. Para cambiar cantidad, separación, radio o modo, hacelo desde la pestaña Atributos (los cambios se ven al instante) en vez de crear otro.');
+      return;
+    }
     arrayModal.classList.add('show');
   });
 }
