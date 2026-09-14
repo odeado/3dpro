@@ -202,6 +202,24 @@
     display: none; flex-direction: column; gap: 10px; width: 100%; box-sizing: border-box;
   }
 
+  /* 3-Axis Inputs (Cinema 4D / Blender style) */
+  .axis-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; }
+  .axis-input-wrap {
+    display: flex; align-items: center; background: #181a1f;
+    border: 1px solid var(--border-color); border-radius: 4px; overflow: hidden;
+  }
+  .axis-tag {
+    font-size: 10px; font-weight: bold; padding: 4px 6px; user-select: none;
+  }
+  .tag-x { background: rgba(235, 87, 87, 0.25); color: #eb5757; }
+  .tag-y { background: rgba(39, 174, 96, 0.25); color: #27ae60; }
+  .tag-z { background: rgba(45, 156, 219, 0.25); color: #2d9cdb; }
+  .axis-input {
+    width: 100%; border: none; background: transparent; color: #abb2bf;
+    padding: 4px 4px; font-size: 11px; text-align: right; box-sizing: border-box;
+  }
+  .axis-input:focus { outline: none; color: #fff; background: rgba(255,255,255,0.05); }
+
   /* Array Cloner Modal */
   .modal-field { display: flex; flex-direction: column; gap: 4px; }
   .modal-field label { font-size: 11px; color: #5c6370; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -329,7 +347,14 @@
   <!-- 2. Tool Options Context Bar (Shows active tool parameters) -->
   <div id="contextBar">
     <div id="defaultToolOptions" class="context-group">
-      <span style="color:#5c6370; font-size:12px;">Modo Selección / Transformación</span>
+      <span style="color:#5c6370; font-size:12px;">Modo Transformación</span>
+      <button id="snapToggleBtn" class="context-btn" title="Activar/Desactivar Imán / Snap (N)">🧲 Imán: OFF</button>
+      <select id="snapGridSelect" class="axis-input" style="background:#1e2227; padding:2px 6px; border:1px solid var(--border-color); border-radius:4px; font-size:11px; width:auto;">
+        <option value="10">Paso: 10 mm</option>
+        <option value="5">Paso: 5 mm</option>
+        <option value="25">Paso: 25 mm</option>
+        <option value="50">Paso: 50 mm</option>
+      </select>
     </div>
     <div id="brushRow" class="context-group" style="display:none;">
       <button class="context-btn active" data-brush="push">⬆️ Empujar</button>
@@ -339,7 +364,7 @@
       <button class="context-btn" data-brush="flatten">🛏️ Aplanar</button>
       <label class="context-slider">Tamaño<input id="brushSize" type="range" min="8" max="60" step="1" value="24"></label>
       <label class="context-slider">Fuerza<input id="brushStrength" type="range" min="1" max="10" step="1" value="4"></label>
-      <label class="context-slider" style="margin-left:4px;"><input id="symmetryX" type="checkbox"> 🪞 Simetría X</label>
+      <label class="context-slider" style="margin-left:4px;"><input id="symmetryX" type="checkbox" checked> 🪞 Simetría X</label>
     </div>
   </div>
 
@@ -382,49 +407,133 @@
     <div id="tabAttributes" class="tab-content">
       <p id="noSelectionMsg" style="color:#5c6370; font-size:12px; text-align:center; margin-top:20px;">Seleccioná un objeto para editar sus atributos.</p>
       <div id="propsPanel">
-        <!-- Material -->
-        <h3>Material</h3>
-        <div class="prop-group">
+        <!-- 1. Transformación & Medidas -->
+        <h3 id="headingTransform">📐 Transformación & Medidas</h3>
+        <div class="prop-group" id="transformGroup">
           <div class="prop-row">
-            <label>Color Base</label>
-            <input id="propsColor" type="color" value="#e0762f">
+            <label>Posición (mm)</label>
+            <div class="axis-row">
+              <div class="axis-input-wrap"><span class="axis-tag tag-x">X</span><input id="posX" class="axis-input" type="number" step="1"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-y">Y</span><input id="posY" class="axis-input" type="number" step="1"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-z">Z</span><input id="posZ" class="axis-input" type="number" step="1"></div>
+            </div>
           </div>
           <div class="prop-row">
-            <label>Rugosidad</label>
-            <input id="propsRoughness" type="range" min="0" max="1" step="0.05" value="0.5">
+            <label>Rotación (°)</label>
+            <div class="axis-row">
+              <div class="axis-input-wrap"><span class="axis-tag tag-x">X</span><input id="rotX" class="axis-input" type="number" step="5"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-y">Y</span><input id="rotY" class="axis-input" type="number" step="5"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-z">Z</span><input id="rotZ" class="axis-input" type="number" step="5"></div>
+            </div>
           </div>
-          <div class="prop-row">
-            <label>Metalizado</label>
-            <input id="propsMetalness" type="range" min="0" max="1" step="0.05" value="0.05">
-          </div>
-          <div class="prop-row">
-            <label>Opacidad</label>
-            <input id="propsOpacity" type="range" min="0.1" max="1" step="0.05" value="1">
-          </div>
-          <div class="prop-row-inline">
-            <label>Wireframe</label>
-            <input id="propsWireframe" type="checkbox">
+          <div class="prop-row" id="dimRow">
+            <label>Dimensiones / Tamaño (mm)</label>
+            <div class="axis-row">
+              <div class="axis-input-wrap"><span class="axis-tag tag-x">An</span><input id="sizeX" class="axis-input" type="number" step="1" min="1"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-y">Al</span><input id="sizeY" class="axis-input" type="number" step="1" min="1"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-z">Pr</span><input id="sizeZ" class="axis-input" type="number" step="1" min="1"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Alineación -->
-        <h3>Alineación & Cámara</h3>
+        <!-- 2. Parámetros de Modificador Simetría (En vivo) -->
+        <div id="symPropsSection" style="display:none;">
+          <h3>🪞 Modificador de Simetría</h3>
+          <div class="prop-group">
+            <div class="prop-row">
+              <label>Eje de Espejo</label>
+              <select id="symAxisSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="x">Eje X (Plano Y-Z)</option>
+                <option value="y">Eje Y (Plano X-Z)</option>
+                <option value="z">Eje Z (Plano X-Y)</option>
+              </select>
+            </div>
+            <div class="prop-row">
+              <label>Separación Centro (mm)</label>
+              <input id="symOffsetInput" type="range" min="0" max="300" step="2" value="0">
+            </div>
+            <button id="symBakeBtn" class="context-btn" style="justify-content:center;">⚡ Convertir a Objetos Fijos</button>
+          </div>
+        </div>
+
+        <!-- 3. Parámetros de Modificador Clonador (En vivo) -->
+        <div id="clonerPropsSection" style="display:none;">
+          <h3>🔁 Modificador Clonador</h3>
+          <div class="prop-group">
+            <div class="prop-row">
+              <label>Modo de Clonación</label>
+              <select id="clonerModeSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="linear">Lineal</option>
+                <option value="circular">Circular</option>
+                <option value="grid">Cuadrícula 3D</option>
+              </select>
+            </div>
+            <div class="prop-row">
+              <label>Cantidad de Copias: <span id="clonerCountVal">3</span></label>
+              <input id="clonerCountInput" type="range" min="1" max="24" step="1" value="3">
+            </div>
+            <div class="prop-row" id="clonerLinearRow">
+              <label>Separación X / Y / Z (mm)</label>
+              <div class="axis-row">
+                <div class="axis-input-wrap"><span class="axis-tag tag-x">X</span><input id="clonerSepX" class="axis-input" type="number" value="80" step="10"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-y">Y</span><input id="clonerSepY" class="axis-input" type="number" value="0" step="10"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-z">Z</span><input id="clonerSepZ" class="axis-input" type="number" value="0" step="10"></div>
+              </div>
+            </div>
+            <div class="prop-row" id="clonerCircularRow" style="display:none;">
+              <label>Radio: <span id="clonerRadiusVal">120</span> mm</label>
+              <input id="clonerRadiusInput" type="range" min="20" max="400" step="5" value="120">
+              <label style="margin-top:4px;"><input id="clonerRotCheck" type="checkbox" checked> Rotar copias en círculo</label>
+            </div>
+            <button id="clonerBakeBtn" class="context-btn" style="justify-content:center;">⚡ Convertir a Objetos Fijos</button>
+          </div>
+        </div>
+
+        <!-- 4. Material -->
+        <div id="matSection">
+          <h3>🎨 Material</h3>
+          <div class="prop-group">
+            <div class="prop-row">
+              <label>Color Base</label>
+              <input id="propsColor" type="color" value="#e0762f">
+            </div>
+            <div class="prop-row">
+              <label>Rugosidad</label>
+              <input id="propsRoughness" type="range" min="0" max="1" step="0.05" value="0.5">
+            </div>
+            <div class="prop-row">
+              <label>Metalizado</label>
+              <input id="propsMetalness" type="range" min="0" max="1" step="0.05" value="0.05">
+            </div>
+            <div class="prop-row">
+              <label>Opacidad</label>
+              <input id="propsOpacity" type="range" min="0.1" max="1" step="0.05" value="1">
+            </div>
+            <div class="prop-row-inline">
+              <label>Wireframe</label>
+              <input id="propsWireframe" type="checkbox">
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Alineación -->
+        <h3>🎯 Alineación & Cámara</h3>
         <div class="prop-group">
           <div class="prop-btn-grid">
-            <button id="alignOriginBtn" class="context-btn">🎯 Centrar</button>
+            <button id="alignOriginBtn" class="context-btn">🎯 Centrar (0,0,0)</button>
             <button id="alignGroundBtn" class="context-btn">⬇️ Al suelo</button>
           </div>
-          <button id="focusCamBtn" class="context-btn" style="justify-content:center;">🔍 Enfocar (F)</button>
+          <button id="focusCamBtn" class="context-btn" style="justify-content:center;">🔍 Enfocar selección (F)</button>
         </div>
 
-        <!-- Simetría & Clonado -->
-        <h3>Simetría & Clonado</h3>
+        <!-- 6. Generadores / Clonadores -->
+        <h3>✨ Generadores & Modificadores</h3>
         <div class="prop-group">
-          <button id="cloneSymBtn" class="context-btn btn-mirror" style="justify-content:center;">🪞 Espejo (Simetría X)</button>
-          <button id="arrayCloneBtn" class="context-btn" style="justify-content:center; background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">🔁 Clonador de Matriz...</button>
+          <button id="cloneSymBtn" class="context-btn btn-mirror" style="justify-content:center;">🪞 Crear Modificador Simetría</button>
+          <button id="arrayCloneBtn" class="context-btn" style="justify-content:center; background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">🔁 Crear Modificador Clonador</button>
         </div>
 
-        <!-- Eliminar -->
+        <!-- 7. Eliminar -->
         <div class="prop-group">
           <button id="deleteObjBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Eliminar objeto (Del)</button>
         </div>

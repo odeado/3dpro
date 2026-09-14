@@ -601,24 +601,179 @@ function setColor(id, hex) {
 }
 
 const noSelectionMsg = document.getElementById('noSelectionMsg');
+const matSection = document.getElementById('matSection');
+const dimRow = document.getElementById('dimRow');
+const symPropsSection = document.getElementById('symPropsSection');
+const clonerPropsSection = document.getElementById('clonerPropsSection');
+
+// Transform inputs
+const posX = document.getElementById('posX');
+const posY = document.getElementById('posY');
+const posZ = document.getElementById('posZ');
+const rotX = document.getElementById('rotX');
+const rotY = document.getElementById('rotY');
+const rotZ = document.getElementById('rotZ');
+const sizeX = document.getElementById('sizeX');
+const sizeY = document.getElementById('sizeY');
+const sizeZ = document.getElementById('sizeZ');
+
+function updateTransformInputs() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || !entry.mesh) return;
+
+  if (document.activeElement && [posX, posY, posZ, rotX, rotY, rotZ, sizeX, sizeY, sizeZ].includes(document.activeElement)) {
+    return;
+  }
+
+  const p = entry.mesh.position;
+  if (posX) posX.value = p.x.toFixed(1).replace(/\.0$/, '');
+  if (posY) posY.value = p.y.toFixed(1).replace(/\.0$/, '');
+  if (posZ) posZ.value = p.z.toFixed(1).replace(/\.0$/, '');
+
+  const r = entry.mesh.rotation;
+  if (rotX) rotX.value = THREE.MathUtils.radToDeg(r.x).toFixed(1).replace(/\.0$/, '');
+  if (rotY) rotY.value = THREE.MathUtils.radToDeg(r.y).toFixed(1).replace(/\.0$/, '');
+  if (rotZ) rotZ.value = THREE.MathUtils.radToDeg(r.z).toFixed(1).replace(/\.0$/, '');
+
+  if (entry.mesh.geometry) {
+    if (!entry.mesh.geometry.boundingBox) entry.mesh.geometry.computeBoundingBox();
+    const bb = entry.mesh.geometry.boundingBox;
+    const baseW = Math.max(0.1, bb.max.x - bb.min.x);
+    const baseH = Math.max(0.1, bb.max.y - bb.min.y);
+    const baseD = Math.max(0.1, bb.max.z - bb.min.z);
+    if (sizeX) sizeX.value = (baseW * Math.abs(entry.mesh.scale.x)).toFixed(1).replace(/\.0$/, '');
+    if (sizeY) sizeY.value = (baseH * Math.abs(entry.mesh.scale.y)).toFixed(1).replace(/\.0$/, '');
+    if (sizeZ) sizeZ.value = (baseD * Math.abs(entry.mesh.scale.z)).toFixed(1).replace(/\.0$/, '');
+    if (dimRow) dimRow.style.display = 'flex';
+  } else {
+    if (dimRow) dimRow.style.display = 'none';
+  }
+}
+
+// Input listeners for Transform & Dimensions
+[posX, posY, posZ].forEach((inp, idx) => {
+  if (!inp) return;
+  const axes = ['x', 'y', 'z'];
+  inp.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry) return;
+    const val = parseFloat(inp.value);
+    if (!isNaN(val)) entry.mesh.position[axes[idx]] = val;
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+[rotX, rotY, rotZ].forEach((inp, idx) => {
+  if (!inp) return;
+  const axes = ['x', 'y', 'z'];
+  inp.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry) return;
+    const val = parseFloat(inp.value);
+    if (!isNaN(val)) entry.mesh.rotation[axes[idx]] = THREE.MathUtils.degToRad(val);
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+[sizeX, sizeY, sizeZ].forEach((inp, idx) => {
+  if (!inp) return;
+  const axes = ['x', 'y', 'z'];
+  inp.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || !entry.mesh.geometry) return;
+    const val = parseFloat(inp.value);
+    if (!isNaN(val) && val > 0) {
+      if (!entry.mesh.geometry.boundingBox) entry.mesh.geometry.computeBoundingBox();
+      const bb = entry.mesh.geometry.boundingBox;
+      const baseSizes = [
+        Math.max(0.1, bb.max.x - bb.min.x),
+        Math.max(0.1, bb.max.y - bb.min.y),
+        Math.max(0.1, bb.max.z - bb.min.z)
+      ];
+      entry.mesh.scale[axes[idx]] = val / baseSizes[idx];
+    }
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+transform.addEventListener('objectChange', () => {
+  updateTransformInputs();
+});
 
 function selectObject(id) {
   selectedId = id;
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
     if (toolMode === 'sculpt' || toolMode === 'hair') transform.detach(); else transform.attach(entry.mesh);
+    propsPanel.style.display = 'flex';
+    if (noSelectionMsg) noSelectionMsg.style.display = 'none';
+
+    // Update Transform & Dimensions
+    updateTransformInputs();
+
+    // Material properties
     if (entry.mesh.material) {
-      propsPanel.style.display = 'flex';
-      if (noSelectionMsg) noSelectionMsg.style.display = 'none';
+      if (matSection) matSection.style.display = 'block';
       propsColor.value = '#' + entry.mesh.material.color.getHexString();
       propsRoughness.value = entry.mesh.material.roughness != null ? entry.mesh.material.roughness : 0.5;
       propsMetalness.value = entry.mesh.material.metalness != null ? entry.mesh.material.metalness : 0.05;
       propsOpacity.value = entry.mesh.material.opacity != null ? entry.mesh.material.opacity : 1.0;
       propsWireframe.checked = !!entry.mesh.material.wireframe;
     } else {
-      propsPanel.style.display = 'none';
-      if (noSelectionMsg) noSelectionMsg.style.display = 'block';
+      if (matSection) matSection.style.display = 'none';
     }
+
+    // Symmetry modifier properties
+    if (symPropsSection) {
+      const isSym = entry.symmetrySourceId != null || (entry.parentId && sceneObjects.get(entry.parentId)?.symmetrySourceId != null);
+      symPropsSection.style.display = isSym ? 'block' : 'none';
+      if (isSym) {
+        const symEntry = entry.symmetrySourceId != null ? entry : sceneObjects.get(entry.parentId);
+        const symAxisSelect = document.getElementById('symAxisSelect');
+        const symOffsetInput = document.getElementById('symOffsetInput');
+        if (symAxisSelect) symAxisSelect.value = symEntry.symAxis || 'x';
+        if (symOffsetInput) symOffsetInput.value = symEntry.symOffset || 0;
+      }
+    }
+
+    // Cloner modifier properties
+    if (clonerPropsSection) {
+      const isCloner = entry.clonerMode != null || (entry.parentId && sceneObjects.get(entry.parentId)?.clonerMode != null);
+      clonerPropsSection.style.display = isCloner ? 'block' : 'none';
+      if (isCloner) {
+        const clonerEntry = entry.clonerMode != null ? entry : sceneObjects.get(entry.parentId);
+        const clonerModeSelect = document.getElementById('clonerModeSelect');
+        const clonerCountInput = document.getElementById('clonerCountInput');
+        const clonerCountVal = document.getElementById('clonerCountVal');
+        const clonerSepX = document.getElementById('clonerSepX');
+        const clonerSepY = document.getElementById('clonerSepY');
+        const clonerSepZ = document.getElementById('clonerSepZ');
+        const clonerRadiusInput = document.getElementById('clonerRadiusInput');
+        const clonerRadiusVal = document.getElementById('clonerRadiusVal');
+        const clonerRotCheck = document.getElementById('clonerRotCheck');
+        const clonerLinearRow = document.getElementById('clonerLinearRow');
+        const clonerCircularRow = document.getElementById('clonerCircularRow');
+
+        if (clonerModeSelect) clonerModeSelect.value = clonerEntry.clonerMode || 'linear';
+        if (clonerCountInput) clonerCountInput.value = clonerEntry.clonerCount || 3;
+        if (clonerCountVal) clonerCountVal.textContent = clonerEntry.clonerCount || 3;
+        if (clonerSepX) clonerSepX.value = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
+        if (clonerSepY) clonerSepY.value = clonerEntry.sepY != null ? clonerEntry.sepY : 0;
+        if (clonerSepZ) clonerSepZ.value = clonerEntry.sepZ != null ? clonerEntry.sepZ : 0;
+        if (clonerRadiusInput) clonerRadiusInput.value = clonerEntry.radius != null ? clonerEntry.radius : 120;
+        if (clonerRadiusVal) clonerRadiusVal.textContent = clonerEntry.radius != null ? clonerEntry.radius : 120;
+        if (clonerRotCheck) clonerRotCheck.checked = clonerEntry.rotCopies !== false;
+
+        const isLinear = (clonerEntry.clonerMode || 'linear') === 'linear';
+        if (clonerLinearRow) clonerLinearRow.style.display = isLinear ? 'flex' : 'none';
+        if (clonerCircularRow) clonerCircularRow.style.display = isLinear ? 'none' : 'flex';
+      }
+    }
+
   } else {
     transform.detach();
     propsPanel.style.display = 'none';
@@ -705,6 +860,290 @@ alignGroundBtn.addEventListener('click', () => {
 });
 
 focusCamBtn.addEventListener('click', focusCameraOnSelection);
+
+// --- Modo Imán (Snapping) ---
+let snapEnabled = false;
+let snapGridStep = 10;
+const snapToggleBtn = document.getElementById('snapToggleBtn');
+const snapGridSelect = document.getElementById('snapGridSelect');
+
+function updateSnapping() {
+  if (snapEnabled) {
+    transform.setTranslationSnap(snapGridStep);
+    transform.setRotationSnap(THREE.MathUtils.degToRad(15));
+  } else {
+    transform.setTranslationSnap(null);
+    transform.setRotationSnap(null);
+  }
+}
+
+if (snapToggleBtn) {
+  snapToggleBtn.addEventListener('click', () => {
+    snapEnabled = !snapEnabled;
+    snapToggleBtn.textContent = snapEnabled ? '🧲 Imán: ON' : '🧲 Imán: OFF';
+    snapToggleBtn.classList.toggle('active', snapEnabled);
+    updateSnapping();
+  });
+}
+
+if (snapGridSelect) {
+  snapGridSelect.addEventListener('change', () => {
+    snapGridStep = parseFloat(snapGridSelect.value) || 10;
+    updateSnapping();
+  });
+}
+
+function applyObjectSnap(id) {
+  const entry = sceneObjects.get(id);
+  if (!entry || entry.kind === 'null') return;
+
+  const snapDist = snapGridStep || 10;
+  const boxA = new THREE.Box3().setFromObject(entry.mesh);
+
+  // Snap al suelo (Y = 0)
+  if (Math.abs(boxA.min.y) <= snapDist) {
+    entry.mesh.position.y -= boxA.min.y;
+  }
+
+  // Snap magnético cara con cara entre objetos vecinos
+  sceneObjects.forEach((other, otherId) => {
+    if (otherId === id || other.kind === 'null' || !other.visible) return;
+    if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
+
+    const boxB = new THREE.Box3().setFromObject(other.mesh);
+
+    if (Math.abs(boxA.max.x - boxB.min.x) <= snapDist) {
+      entry.mesh.position.x -= (boxA.max.x - boxB.min.x);
+    } else if (Math.abs(boxA.min.x - boxB.max.x) <= snapDist) {
+      entry.mesh.position.x -= (boxA.min.x - boxB.max.x);
+    }
+
+    if (Math.abs(boxA.min.y - boxB.max.y) <= snapDist) {
+      entry.mesh.position.y -= (boxA.min.y - boxB.max.y);
+    } else if (Math.abs(boxA.max.y - boxB.min.y) <= snapDist) {
+      entry.mesh.position.y -= (boxA.max.y - boxB.min.y);
+    }
+
+    if (Math.abs(boxA.max.z - boxB.min.z) <= snapDist) {
+      entry.mesh.position.z -= (boxA.max.z - boxB.min.z);
+    } else if (Math.abs(boxA.min.z - boxB.max.z) <= snapDist) {
+      entry.mesh.position.z -= (boxA.min.z - boxB.max.z);
+    }
+  });
+
+  updateTransformInputs();
+}
+
+transform.addEventListener('dragging-changed', (e) => {
+  orbit.enabled = !e.value;
+  if (!e.value) {
+    if (snapEnabled && selectedId != null) {
+      applyObjectSnap(selectedId);
+    }
+    pushHistory();
+  }
+});
+
+// --- Modificador Simetría en Vivo ---
+const symAxisSelect = document.getElementById('symAxisSelect');
+const symOffsetInput = document.getElementById('symOffsetInput');
+const symBakeBtn = document.getElementById('symBakeBtn');
+
+if (symAxisSelect) {
+  symAxisSelect.addEventListener('change', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    const symEntry = (entry && entry.symmetrySourceId != null) ? entry : (entry?.parentId ? sceneObjects.get(entry.parentId) : null);
+    if (symEntry && symEntry.symmetrySourceId != null) {
+      symEntry.symAxis = symAxisSelect.value;
+      pushHistory();
+    }
+  });
+}
+
+if (symOffsetInput) {
+  symOffsetInput.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    const symEntry = (entry && entry.symmetrySourceId != null) ? entry : (entry?.parentId ? sceneObjects.get(entry.parentId) : null);
+    if (symEntry && symEntry.symmetrySourceId != null) {
+      symEntry.symOffset = parseFloat(symOffsetInput.value) || 0;
+    }
+  });
+  symOffsetInput.addEventListener('change', () => pushHistory());
+}
+
+if (symBakeBtn) {
+  symBakeBtn.addEventListener('click', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    const symEntry = (entry && entry.symmetrySourceId != null) ? entry : (entry?.parentId ? sceneObjects.get(entry.parentId) : null);
+    if (symEntry && symEntry.symmetrySourceId != null) {
+      symEntry.symmetrySourceId = null;
+      sceneObjects.forEach(e => {
+        if (e.parentId === symEntry.id) e.isMirrorOf = null;
+      });
+      symEntry.name = symEntry.name.replace('🪞 Simetría', '🗂️ Grupo');
+      renderLayerList();
+      selectObject(symEntry.id);
+      pushHistory();
+    }
+  });
+}
+
+// --- Modificador Clonador en Vivo ---
+function updateClonerLive(clonerEntry) {
+  if (!clonerEntry || !clonerEntry.clonerMode) return;
+  const srcId = clonerEntry.clonerSourceId;
+  const src = sceneObjects.get(srcId);
+  if (!src) return;
+
+  if (clonerEntry.clonerChildIds) {
+    clonerEntry.clonerChildIds.forEach(cid => {
+      const e = sceneObjects.get(cid);
+      if (e) {
+        scene.remove(e.mesh);
+        disposeEntry(e);
+        sceneObjects.delete(cid);
+      }
+    });
+  }
+  clonerEntry.clonerChildIds = [];
+
+  const mode = clonerEntry.clonerMode || 'linear';
+  const count = clonerEntry.clonerCount || 3;
+  const srcPos = new THREE.Vector3();
+  src.mesh.getWorldPosition(srcPos);
+
+  if (mode === 'linear') {
+    const ox = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
+    const oy = clonerEntry.sepY != null ? clonerEntry.sepY : 0;
+    const oz = clonerEntry.sepZ != null ? clonerEntry.sepZ : 0;
+    for (let i = 1; i <= count; i++) {
+      const pos = srcPos.clone().add(new THREE.Vector3(ox * i, oy * i, oz * i));
+      const newId = cloneEntryAt(src, pos);
+      const e = sceneObjects.get(newId);
+      if (e) {
+        clonerEntry.mesh.attach(e.mesh);
+        e.parentId = clonerEntry.id;
+        clonerEntry.clonerChildIds.push(newId);
+      }
+    }
+  } else if (mode === 'circular') {
+    const radius = clonerEntry.radius != null ? clonerEntry.radius : 120;
+    const total = count + 1;
+    const angleStep = (Math.PI * 2) / total;
+    for (let i = 1; i < total; i++) {
+      const a = angleStep * i;
+      const pos = new THREE.Vector3(srcPos.x + Math.cos(a) * radius, srcPos.y, srcPos.z + Math.sin(a) * radius);
+      const newId = cloneEntryAt(src, pos);
+      const e = sceneObjects.get(newId);
+      if (e) {
+        if (clonerEntry.rotCopies !== false) e.mesh.rotation.y = src.mesh.rotation.y + a;
+        clonerEntry.mesh.attach(e.mesh);
+        e.parentId = clonerEntry.id;
+        clonerEntry.clonerChildIds.push(newId);
+      }
+    }
+  }
+
+  renderLayerList();
+}
+
+function getActiveCloner() {
+  if (selectedId == null) return null;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry) return null;
+  if (entry.clonerMode != null) return entry;
+  if (entry.parentId) {
+    const p = sceneObjects.get(entry.parentId);
+    if (p && p.clonerMode != null) return p;
+  }
+  return null;
+}
+
+const clonerModeSelect = document.getElementById('clonerModeSelect');
+const clonerCountInput = document.getElementById('clonerCountInput');
+const clonerCountVal = document.getElementById('clonerCountVal');
+const clonerSepX = document.getElementById('clonerSepX');
+const clonerSepY = document.getElementById('clonerSepY');
+const clonerSepZ = document.getElementById('clonerSepZ');
+const clonerRadiusInput = document.getElementById('clonerRadiusInput');
+const clonerRadiusVal = document.getElementById('clonerRadiusVal');
+const clonerRotCheck = document.getElementById('clonerRotCheck');
+const clonerBakeBtn = document.getElementById('clonerBakeBtn');
+
+if (clonerModeSelect) {
+  clonerModeSelect.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.clonerMode = clonerModeSelect.value;
+    const isLinear = cloner.clonerMode === 'linear';
+    const clonerLinearRow = document.getElementById('clonerLinearRow');
+    const clonerCircularRow = document.getElementById('clonerCircularRow');
+    if (clonerLinearRow) clonerLinearRow.style.display = isLinear ? 'flex' : 'none';
+    if (clonerCircularRow) clonerCircularRow.style.display = isLinear ? 'none' : 'flex';
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
+
+if (clonerCountInput) {
+  clonerCountInput.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.clonerCount = parseInt(clonerCountInput.value) || 3;
+    if (clonerCountVal) clonerCountVal.textContent = cloner.clonerCount;
+    updateClonerLive(cloner);
+  });
+  clonerCountInput.addEventListener('change', () => pushHistory());
+}
+
+[clonerSepX, clonerSepY, clonerSepZ].forEach((inp, idx) => {
+  if (!inp) return;
+  const keys = ['sepX', 'sepY', 'sepZ'];
+  inp.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner[keys[idx]] = parseFloat(inp.value) || 0;
+    updateClonerLive(cloner);
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+if (clonerRadiusInput) {
+  clonerRadiusInput.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.radius = parseFloat(clonerRadiusInput.value) || 120;
+    if (clonerRadiusVal) clonerRadiusVal.textContent = cloner.radius;
+    updateClonerLive(cloner);
+  });
+  clonerRadiusInput.addEventListener('change', () => pushHistory());
+}
+
+if (clonerRotCheck) {
+  clonerRotCheck.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.rotCopies = clonerRotCheck.checked;
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
+
+if (clonerBakeBtn) {
+  clonerBakeBtn.addEventListener('click', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.clonerMode = null;
+    cloner.clonerChildIds = null;
+    cloner.name = cloner.name.replace('🔁', '🗂️');
+    renderLayerList();
+    selectObject(cloner.id);
+    pushHistory();
+  });
+}
 
 const cloneSymBtn = document.getElementById('cloneSymBtn');
 if (cloneSymBtn) {
@@ -1430,77 +1869,119 @@ function getAdjacency(geometry) {
   return adj;
 }
 
-function applySculptStrokeSingle(entry, localPoint, brush, size, strength) {
+function syncSymmetryMirrorsFor(srcId) {
+  const srcEntry = sceneObjects.get(srcId);
+  if (!srcEntry || !srcEntry.mesh || !srcEntry.mesh.geometry) return;
+  sceneObjects.forEach(e => {
+    if (e.isMirrorOf === srcId && e.mesh && e.mesh.geometry) {
+      const srcPos = srcEntry.mesh.geometry.attributes.position;
+      const dstPos = e.mesh.geometry.attributes.position;
+      if (srcPos && dstPos && srcPos.count === dstPos.count) {
+        for (let i = 0; i < srcPos.count; i++) {
+          dstPos.setXYZ(i, -srcPos.getX(i), srcPos.getY(i), srcPos.getZ(i));
+        }
+        dstPos.needsUpdate = true;
+        e.mesh.geometry.computeVertexNormals();
+        e.mesh.geometry.computeBoundingSphere();
+        e.sculpted = true;
+      }
+    }
+  });
+}
+
+function applySculptStroke(entry, localPoint, brush, size, strength) {
+  const centers = [{ pt: localPoint, signX: 1 }];
+  if (symmetryXInput && symmetryXInput.checked) {
+    centers.push({ pt: new THREE.Vector3(-localPoint.x, localPoint.y, localPoint.z), signX: -1 });
+  }
+
   const geo = entry.mesh.geometry;
   const posAttr = geo.attributes.position;
   const normAttr = geo.attributes.normal;
   const radius = size;
+  const count = posAttr.count;
 
   if (brush === 'smooth') {
     const adj = getAdjacency(geo);
     const original = posAttr.array.slice();
-    for (let i = 0; i < posAttr.count; i++) {
+    for (let i = 0; i < count; i++) {
       const vx = original[i * 3], vy = original[i * 3 + 1], vz = original[i * 3 + 2];
-      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist > radius) continue;
-      const falloff = 1 - dist / radius;
+      let maxFalloff = 0;
+      centers.forEach(c => {
+        const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist <= radius) maxFalloff = Math.max(maxFalloff, 1 - dist / radius);
+      });
+      if (maxFalloff <= 0) continue;
       const neighbors = adj[i];
       if (!neighbors || neighbors.size === 0) continue;
       let ax = 0, ay = 0, az = 0;
       neighbors.forEach(n => { ax += original[n * 3]; ay += original[n * 3 + 1]; az += original[n * 3 + 2]; });
       const cnt = neighbors.size;
       ax /= cnt; ay /= cnt; az /= cnt;
-      const k = falloff * strength * 0.15;
+      const k = maxFalloff * strength * 0.15;
       posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
     }
   } else if (brush === 'flatten') {
-    let avgX = 0, avgY = 0, avgZ = 0;
-    let avgNx = 0, avgNy = 0, avgNz = 0;
-    let count = 0;
-    for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
-      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
-      if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= radius) {
-        avgX += vx; avgY += vy; avgZ += vz;
-        if (normAttr) { avgNx += normAttr.getX(i); avgNy += normAttr.getY(i); avgNz += normAttr.getZ(i); }
-        count++;
-      }
-    }
-    if (count > 0) {
-      avgX /= count; avgY /= count; avgZ /= count;
-      let norm = new THREE.Vector3(avgNx, avgNy, avgNz).normalize();
-      if (norm.lengthSq() < 0.001) norm.set(0, 1, 0);
-
-      for (let i = 0; i < posAttr.count; i++) {
+    centers.forEach(c => {
+      let avgX = 0, avgY = 0, avgZ = 0;
+      let avgNx = 0, avgNy = 0, avgNz = 0;
+      let cnt = 0;
+      for (let i = 0; i < count; i++) {
         const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
-        const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
+        const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
+        if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= radius) {
+          avgX += vx; avgY += vy; avgZ += vz;
+          if (normAttr) { avgNx += normAttr.getX(i); avgNy += normAttr.getY(i); avgNz += normAttr.getZ(i); }
+          cnt++;
+        }
+      }
+      if (cnt > 0) {
+        avgX /= cnt; avgY /= cnt; avgZ /= cnt;
+        let norm = new THREE.Vector3(avgNx, avgNy, avgNz).normalize();
+        if (norm.lengthSq() < 0.001) norm.set(0, 1, 0);
+        for (let i = 0; i < count; i++) {
+          const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
+          const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (dist > radius) continue;
+          const t = 1 - dist / radius;
+          const falloff = t * t * (3 - 2 * t);
+          const distToPlane = (vx - avgX) * norm.x + (vy - avgY) * norm.y + (vz - avgZ) * norm.z;
+          const k = falloff * strength * 0.2;
+          posAttr.setXYZ(i, vx - norm.x * distToPlane * k, vy - norm.y * distToPlane * k, vz - norm.z * distToPlane * k);
+        }
+      }
+    });
+  } else {
+    const origPos = posAttr.array.slice();
+    for (let i = 0; i < count; i++) {
+      const vx = origPos[i * 3], vy = origPos[i * 3 + 1], vz = origPos[i * 3 + 2];
+      let totalDx = 0, totalDy = 0, totalDz = 0;
+      centers.forEach(c => {
+        const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist > radius) continue;
+        if (dist > radius) return;
         const t = 1 - dist / radius;
         const falloff = t * t * (3 - 2 * t);
-        const distToPlane = (vx - avgX) * norm.x + (vy - avgY) * norm.y + (vz - avgZ) * norm.z;
-        const k = falloff * strength * 0.2;
-        posAttr.setXYZ(i, vx - norm.x * distToPlane * k, vy - norm.y * distToPlane * k, vz - norm.z * distToPlane * k);
-      }
-    }
-  } else {
-    for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
-      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist > radius) continue;
-      const t = 1 - dist / radius;
-      const falloff = t * t * (3 - 2 * t);
-
-      if (brush === 'pinch') {
-        const k = falloff * strength * 0.08;
-        posAttr.setXYZ(i, vx + (localPoint.x - vx) * k, vy + (localPoint.y - vy) * k, vz + (localPoint.z - vz) * k);
-      } else {
-        const nx = normAttr.getX(i), ny = normAttr.getY(i), nz = normAttr.getZ(i);
-        const dir = brush === 'pull' ? -1 : 1;
-        const k = falloff * strength * 0.6 * dir;
-        posAttr.setXYZ(i, vx + nx * k, vy + ny * k, vz + nz * k);
+        if (brush === 'pinch') {
+          const k = falloff * strength * 0.08;
+          totalDx += (c.pt.x - vx) * k;
+          totalDy += (c.pt.y - vy) * k;
+          totalDz += (c.pt.z - vz) * k;
+        } else {
+          const nx = normAttr ? normAttr.getX(i) : 0;
+          const ny = normAttr ? normAttr.getY(i) : 1;
+          const nz = normAttr ? normAttr.getZ(i) : 0;
+          const dir = brush === 'pull' ? -1 : 1;
+          const k = falloff * strength * 0.6 * dir;
+          totalDx += nx * k;
+          totalDy += ny * k;
+          totalDz += nz * k;
+        }
+      });
+      if (totalDx !== 0 || totalDy !== 0 || totalDz !== 0) {
+        posAttr.setXYZ(i, vx + totalDx, vy + totalDy, vz + totalDz);
       }
     }
   }
@@ -1509,15 +1990,8 @@ function applySculptStrokeSingle(entry, localPoint, brush, size, strength) {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   entry.sculpted = true;
-}
 
-function applySculptStroke(entry, localPoint, brush, size, strength) {
-  applySculptStrokeSingle(entry, localPoint, brush, size, strength);
-  if (symmetryXInput && symmetryXInput.checked) {
-    const symPoint = localPoint.clone();
-    symPoint.x = -symPoint.x;
-    applySculptStrokeSingle(entry, symPoint, brush, size, strength);
-  }
+  syncSymmetryMirrorsFor(entry.id);
 }
 
 // Detectar el inicio de un trazo de escultura ANTES de que OrbitControls/

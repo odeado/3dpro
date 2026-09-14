@@ -4,7 +4,7 @@
 // vieja se quedara pegada la primera vez). Cada vez que se cambian estos
 // archivos hay que subir el numero de CACHE_NAME una vez mas, asi el
 // activate() de abajo tira a la basura la cache anterior.
-const CACHE_NAME = 'editor3d-v9';
+const CACHE_NAME = 'editor3d-v10';
 const ASSETS = [
   './', './index.html', './main.js',
   './vendor/three.module.js', './vendor/three.core.js',
