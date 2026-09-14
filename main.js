@@ -1862,6 +1862,22 @@ toggleSidePanelBtn.addEventListener('click', () => {
   setTimeout(updateCanvasDimensions, 220);
 });
 
+// --- Version comoda para celular ---
+// En pantalla angosta, el panel derecho (pensado para tablet/escritorio)
+// se convierte en una bandeja que se desliza ENCIMA del visor 3D en vez de
+// empujarlo a una tira angosta (ver CSS "@media (max-width: 720px)" en
+// index.html). Tocar el fondo oscuro detras del panel lo cierra, igual que
+// tocar el boton ▶/◀ de siempre.
+const panelBackdrop = document.getElementById('panelBackdrop');
+if (panelBackdrop) {
+  panelBackdrop.addEventListener('click', () => toggleSidePanelBtn.click());
+}
+// Al abrir la app en un celular, arranca con el panel cerrado para ver el
+// 3D de entrada -- se abre tocando el boton ▶ cuando hace falta.
+if (window.innerWidth <= 720 && !rightPanel.classList.contains('collapsed')) {
+  toggleSidePanelBtn.click();
+}
+
 // --- Lógica de Menús Desplegables Header ---
 document.querySelectorAll('.dropdown .dropbtn').forEach(btn => {
   btn.addEventListener('click', (e) => {

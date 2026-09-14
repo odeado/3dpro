@@ -352,13 +352,80 @@
   #partsTable td { padding: 5px 8px; border-bottom: 1px solid #1e2430; color: #cbd5e1; }
   #partsTable tr:nth-child(even) td { background: #1a1f2b; }
   #partsTable .parts-total { color: #38bdf8; font-weight: 700; }
+
+  /* ============================================================
+     Version comoda para celular (pantallas angostas) -- todo lo
+     de arriba se penso para tablet/escritorio con mas ancho; estas
+     reglas no tocan nada del layout normal, solo se activan cuando
+     la pantalla es angosta.
+     ============================================================ */
+  #panelBackdrop {
+    display: none;
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 80; /* mismo nivel que la paleta izquierda y el panel derecho: como en el HTML queda ANTES del panel pero DESPUES de la paleta, el orden del DOM lo deja tapando la paleta (para poder cerrar tocando ahi) pero debajo del panel. */
+  }
+
+  @media (max-width: 720px) {
+    /* Los menus desplegables del header eran solo "hover" (mouse encima),
+       que en un celular no existe -- con :focus-within tambien se abren
+       con un toque, igual que con el mouse en la compu. */
+    .dropdown:focus-within .dropdown-content { display: flex; flex-direction: column; }
+
+    /* Header: se esconde el nombre de la app y se achican los botones de
+       menu para que entren en una sola fila angosta; si aun asi no entra
+       todo, se puede deslizar el dedo en vez de que se corte. */
+    .brand span.brand-text { display: none; }
+    .header-left { overflow-x: auto; scrollbar-width: none; flex: 1 1 auto; min-width: 0; }
+    .header-left::-webkit-scrollbar { display: none; }
+    .dropbtn { padding: 6px 7px; font-size: 11px; }
+    .header-right { flex: 0 0 auto; }
+
+    /* Barra de opciones del modo activo: el texto "Modo Transformacion"
+       sobra en pantalla chica, y el resto se achica un poco. */
+    #contextBar { padding: 0 8px; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+    #contextBar::-webkit-scrollbar { display: none; }
+    #defaultToolOptions > span { display: none; }
+    .context-btn { padding: 4px 8px; font-size: 11px; }
+    .context-slider { font-size: 11px; }
+    .context-slider input[type="range"] { width: 50px; }
+
+    /* Paleta de herramientas de la izquierda: un poco mas grande para el
+       dedo (en la compu alcanza con el mouse, en celular no). */
+    .tool-btn { width: 40px; height: 40px; font-size: 17px; }
+
+    /* Panel derecho: en la compu empuja el 3D a un costado; en celular
+       ese mismo panel de 290px se comeria casi toda la pantalla, asi que
+       en vez de empujar el visor 3D se desliza ENCIMA de el (como una
+       bandeja), con un fondo oscuro atras para volver a tocar y cerrar.
+       Se abre y cierra con el mismo boton ▶ / ◀ de siempre. */
+    #rightPanel { width: min(86vw, 360px); box-shadow: -6px 0 24px rgba(0,0,0,0.5); }
+    #canvasWrap { right: 0 !important; }
+    #toggleSidePanelBtn { right: 8px !important; width: 34px; height: 34px; font-size: 13px; }
+    body:not(.side-collapsed) #panelBackdrop { display: block; }
+
+    /* Menos aire en los paneles de atributos para que entre mas contenido
+       sin tener que scrollear tanto. */
+    .prop-group { padding: 8px; gap: 8px; }
+    .tab-content { padding: 8px; gap: 8px; }
+    .tab-btn { font-size: 10px; padding: 7px 2px; }
+
+    /* Los atajos de teclado (G/R/S/F...) no sirven en celular. */
+    #statusHint { display: none; }
+  }
+
+  @media (max-width: 420px) {
+    /* Telefonos bien angostos: la fila de X/Y/Z para posicion/rotacion/
+       tamaño queda muy apretada en 3 columnas -- se apilan en 1 columna. */
+    .axis-row { grid-template-columns: 1fr; }
+    #rightPanel { width: min(92vw, 360px); }
+  }
 </style>
 </head>
 <body>
   <!-- 1. Header Bar (Cinema 4D / Blender style main header) -->
   <header id="mainHeader">
     <div class="header-left">
-      <div class="brand">🎨 3DPro</div>
+      <div class="brand">🎨 <span class="brand-text">3DPro</span></div>
 
       <div class="dropdown" id="fileMenu">
         <button class="dropbtn">Archivo ▾</button>
@@ -478,6 +545,7 @@
   </div>
 
   <button id="toggleSidePanelBtn" title="Contraer/Expandir Panel">▶</button>
+  <div id="panelBackdrop"></div>
   <!-- 4. Right Panel with Outliner, Attributes and Environment tabs -->
   <aside id="rightPanel">
     <div class="panel-tabs">
