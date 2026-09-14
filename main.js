@@ -813,6 +813,7 @@ function selectObject(id) {
     propsPanel.style.display = 'none';
     if (noSelectionMsg) noSelectionMsg.style.display = 'block';
   }
+  updateHandles(id);
   renderLayerList();
 }
 
@@ -901,6 +902,182 @@ alignGroundBtn.addEventListener('click', () => {
 
 focusCamBtn.addEventListener('click', focusCameraOnSelection);
 
+// --- Ajuste de Pivote / Eje (Base, Centro, Tope, Izquierda, Derecha, Frente) ---
+function setPivot(id, alignX, alignY, alignZ) {
+  if (id == null) return;
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+
+  if (entry.kind === 'null') {
+    // Para Nulo / Grupo / Clonador / Simetría
+    const children = Array.from(sceneObjects.values()).filter(e => e.parentId === id);
+    if (children.length === 0) return;
+
+    const groupBBox = new THREE.Box3();
+    children.forEach(c => groupBBox.expandByObject(c.mesh));
+
+    const targetW = new THREE.Vector3();
+    targetW.x = alignX === 'min' ? groupBBox.min.x : (alignX === 'max' ? groupBBox.max.x : (alignX === 'center' ? (groupBBox.min.x + groupBBox.max.x) / 2 : entry.mesh.position.x));
+    targetW.y = alignY === 'min' ? groupBBox.min.y : (alignY === 'max' ? groupBBox.max.y : (alignY === 'center' ? (groupBBox.min.y + groupBBox.max.y) / 2 : entry.mesh.position.y));
+    targetW.z = alignZ === 'min' ? groupBBox.min.z : (alignZ === 'max' ? groupBBox.max.z : (alignZ === 'center' ? (groupBBox.min.z + groupBBox.max.z) / 2 : entry.mesh.position.z));
+
+    // Desacoplar temporalmente los hijos conservando su posición en el mundo
+    children.forEach(c => scene.attach(c.mesh));
+    entry.mesh.position.copy(targetW);
+    // Re-acoplar los hijos bajo el nuevo centro del Nulo
+    children.forEach(c => {
+      entry.mesh.attach(c.mesh);
+      c.parentId = id;
+    });
+
+  } else if (entry.mesh.geometry) {
+    const geo = entry.mesh.geometry;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+
+    // Punto de pivote objetivo en espacio local
+    const targetOffset = new THREE.Vector3(
+      alignX === 'min' ? bb.min.x : (alignX === 'max' ? bb.max.x : (alignX === 'center' ? (bb.min.x + bb.max.x) / 2 : 0)),
+      alignY === 'min' ? bb.min.y : (alignY === 'max' ? bb.max.y : (alignY === 'center' ? (bb.min.y + bb.max.y) / 2 : 0)),
+      alignZ === 'min' ? bb.min.z : (alignZ === 'max' ? bb.max.z : (alignZ === 'center' ? (bb.min.z + bb.max.z) / 2 : 0))
+    );
+
+    if (targetOffset.lengthSq() > 0.00001) {
+      geo.translate(-targetOffset.x, -targetOffset.y, -targetOffset.z);
+      if (geo.attributes.position) geo.attributes.position.needsUpdate = true;
+      geo.computeBoundingBox();
+      geo.computeBoundingSphere();
+      geo.computeVertexNormals();
+      entry.sculpted = true; // Guarda los vértices modificados en el snapshot
+
+      // Compensar la posición del objeto para que visualmente permanezca en su lugar exacto
+      const deltaWorld = targetOffset.clone().applyEuler(entry.mesh.rotation).multiply(entry.mesh.scale);
+      entry.mesh.position.add(deltaWorld);
+    }
+  }
+
+  transform.attach(entry.mesh);
+  updateTransformInputs();
+  pushHistory();
+}
+
+const pivotBaseBtn = document.getElementById('pivotBaseBtn');
+const pivotCenterBtn = document.getElementById('pivotCenterBtn');
+const pivotTopBtn = document.getElementById('pivotTopBtn');
+const pivotLeftBtn = document.getElementById('pivotLeftBtn');
+const pivotRightBtn = document.getElementById('pivotRightBtn');
+const pivotFrontBtn = document.getElementById('pivotFrontBtn');
+
+if (pivotBaseBtn) pivotBaseBtn.addEventListener('click', () => setPivot(selectedId, null, 'min', null));
+if (pivotCenterBtn) pivotCenterBtn.addEventListener('click', () => setPivot(selectedId, 'center', 'center', 'center'));
+if (pivotTopBtn) pivotTopBtn.addEventListener('click', () => setPivot(selectedId, null, 'max', null));
+if (pivotLeftBtn) pivotLeftBtn.addEventListener('click', () => setPivot(selectedId, 'min', null, null));
+if (pivotRightBtn) pivotRightBtn.addEventListener('click', () => setPivot(selectedId, 'max', null, null));
+if (pivotFrontBtn) pivotFrontBtn.addEventListener('click', () => setPivot(selectedId, null, null, 'max'));
+
+// // =====================================================================
+// 3D REAL-TIME DIMENSION & DISTANCE HUD + INTERACTIVE TIRADORES (HANDLES)
+// =====================================================================
+const dimensionHud = document.getElementById('dimensionHud');
+
+// Línea punteada 3D para medir distancias y holguras
+const dashedLinePositions = new Float32Array(6);
+const dashedLineGeo = new THREE.BufferGeometry();
+dashedLineGeo.setAttribute('position', new THREE.BufferAttribute(dashedLinePositions, 3));
+const dashedLineMat = new THREE.LineDashedMaterial({
+  color: 0x00e5ff,
+  dashSize: 6,
+  gapSize: 4,
+  depthTest: false,
+  transparent: true,
+  opacity: 0.95
+});
+const dashedGuideLine = new THREE.Line(dashedLineGeo, dashedLineMat);
+dashedGuideLine.visible = false;
+dashedGuideLine.renderOrder = 999;
+scene.add(dashedGuideLine);
+
+function setDashedLine(p1, p2) {
+  dashedLinePositions[0] = p1.x;
+  dashedLinePositions[1] = p1.y;
+  dashedLinePositions[2] = p1.z;
+  dashedLinePositions[3] = p2.x;
+  dashedLinePositions[4] = p2.y;
+  dashedLinePositions[5] = p2.z;
+  dashedLineGeo.attributes.position.needsUpdate = true;
+  dashedGuideLine.computeLineDistances();
+  dashedGuideLine.visible = true;
+}
+
+function hideDashedLine() {
+  if (dashedGuideLine) dashedGuideLine.visible = false;
+}
+
+// Proyección de 3D a coordenadas 2D del Canvas
+function project3DToScreen(worldPos) {
+  if (!worldPos) return { x: -9999, y: -9999, visible: false };
+  const p = worldPos.clone().project(activeCamera);
+  const rect = wrap.getBoundingClientRect();
+  const x = (p.x * 0.5 + 0.5) * rect.width;
+  const y = (-(p.y * 0.5) + 0.5) * rect.height;
+  return { x, y, visible: p.z < 1 };
+}
+
+let activeHudBadges = [];
+
+function clearDimensionHUD() {
+  if (dimensionHud) dimensionHud.innerHTML = '';
+  activeHudBadges = [];
+  hideDashedLine();
+  hideSnapGuides();
+}
+
+function showHudBadge(id, text, worldPos, type = 'size', isTope = false) {
+  if (!dimensionHud) return;
+  let badge = document.getElementById(`hud_badge_${id}`);
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = `hud_badge_${id}`;
+    badge.className = `hud-badge hud-badge-${type}`;
+    dimensionHud.appendChild(badge);
+  }
+  badge.className = `hud-badge hud-badge-${type}` + (isTope ? ' tope' : '') + (type === 'size' ? ' active-orange' : '');
+  badge.innerHTML = text;
+  badge.dataset.worldX = worldPos.x;
+  badge.dataset.worldY = worldPos.y;
+  badge.dataset.worldZ = worldPos.z;
+
+  const screen = project3DToScreen(worldPos);
+  if (screen.visible) {
+    badge.style.display = 'flex';
+    badge.style.left = `${screen.x}px`;
+    badge.style.top = `${screen.y}px`;
+  } else {
+    badge.style.display = 'none';
+  }
+
+  if (!activeHudBadges.includes(badge)) activeHudBadges.push(badge);
+}
+
+function updateHUDPositions() {
+  if (activeHudBadges.length === 0) return;
+  activeHudBadges.forEach(badge => {
+    const wx = parseFloat(badge.dataset.worldX);
+    const wy = parseFloat(badge.dataset.worldY);
+    const wz = parseFloat(badge.dataset.worldZ);
+    if (!isNaN(wx)) {
+      const screen = project3DToScreen(new THREE.Vector3(wx, wy, wz));
+      if (screen.visible) {
+        badge.style.display = 'flex';
+        badge.style.left = `${screen.x}px`;
+        badge.style.top = `${screen.y}px`;
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+  });
+}
+
 // --- Guías Visuales de Contacto Magnético (Imán Celeste #00e5ff) ---
 const snapGuideGeo = new THREE.BoxGeometry(1, 1, 1);
 const snapGuideMat = new THREE.MeshBasicMaterial({
@@ -948,6 +1125,227 @@ function hideSnapGuides() {
   if (snapPlaneMesh) snapPlaneMesh.visible = false;
 }
 
+// =====================================================================
+// INTERACTIVE FACE/EDGE HANDLES (TIRADORES 3D DIRECTOS)
+// =====================================================================
+const handleGroup = new THREE.Group();
+handleGroup.renderOrder = 997;
+scene.add(handleGroup);
+
+const handleDefinitions = [
+  { id: 'handle_right',  axis: 'x', dir: 1,  name: 'Der',   color: 0x38bdf8 },
+  { id: 'handle_left',   axis: 'x', dir: -1, name: 'Izq',   color: 0x38bdf8 },
+  { id: 'handle_top',    axis: 'y', dir: 1,  name: 'Arriba',color: 0x22c55e },
+  { id: 'handle_bottom', axis: 'y', dir: -1, name: 'Abajo', color: 0x22c55e },
+  { id: 'handle_front',  axis: 'z', dir: 1,  name: 'Frente',color: 0x38bdf8 },
+  { id: 'handle_back',   axis: 'z', dir: -1, name: 'Atrás', color: 0x38bdf8 }
+];
+
+const handleMeshes = [];
+const handleGeo = new THREE.BoxGeometry(6, 6, 6);
+
+handleDefinitions.forEach(def => {
+  const mat = new THREE.MeshBasicMaterial({
+    color: def.color,
+    depthTest: false,
+    transparent: true,
+    opacity: 0.95
+  });
+  const mesh = new THREE.Mesh(handleGeo, mat);
+  mesh.userData = { isHandle: true, def };
+  
+  const wireGeo = new THREE.EdgesGeometry(handleGeo);
+  const wireMat = new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false });
+  const wire = new THREE.LineSegments(wireGeo, wireMat);
+  mesh.add(wire);
+
+  handleGroup.add(mesh);
+  handleMeshes.push(mesh);
+});
+
+function updateHandles(id) {
+  if (id == null) {
+    handleGroup.visible = false;
+    return;
+  }
+  const entry = sceneObjects.get(id);
+  if (!entry || entry.kind === 'null' || !entry.mesh.geometry || toolMode === 'sculpt' || toolMode === 'hair') {
+    handleGroup.visible = false;
+    return;
+  }
+
+  const box = new THREE.Box3().setFromObject(entry.mesh);
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  box.getCenter(center);
+  box.getSize(size);
+
+  handleMeshes.forEach(mesh => {
+    const def = mesh.userData.def;
+    const pos = center.clone();
+    if (def.axis === 'x') pos.x += (def.dir * size.x / 2);
+    else if (def.axis === 'y') pos.y += (def.dir * size.y / 2);
+    else if (def.axis === 'z') pos.z += (def.dir * size.z / 2);
+    mesh.position.copy(pos);
+  });
+
+  handleGroup.visible = true;
+}
+
+// Estado de Arrastre de Tiradores
+let isDraggingHandle = false;
+let activeDragHandle = null;
+let dragStartPos = new THREE.Vector3();
+let dragStartScale = new THREE.Vector3();
+let dragStartBox = new THREE.Box3();
+let dragBaseDimensions = { w: 100, h: 100, d: 100 };
+let dragPlane = new THREE.Plane();
+
+function startHandleDrag(handleMesh) {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || !entry.mesh.geometry) return;
+
+  isDraggingHandle = true;
+  activeDragHandle = handleMesh.userData.def;
+  orbit.enabled = false;
+  transform.detach(); // Oculta el gizmo mientras se estira con el tirador
+
+  dragStartPos.copy(entry.mesh.position);
+  dragStartScale.copy(entry.mesh.scale);
+  dragStartBox.setFromObject(entry.mesh);
+
+  const bb = entry.mesh.geometry.boundingBox || new THREE.Box3().setFromBufferAttribute(entry.mesh.geometry.attributes.position);
+  dragBaseDimensions = {
+    w: Math.max(0.1, bb.max.x - bb.min.x),
+    h: Math.max(0.1, bb.max.y - bb.min.y),
+    d: Math.max(0.1, bb.max.z - bb.min.z)
+  };
+
+  const handleWorldPos = handleMesh.position.clone();
+  const camDir = new THREE.Vector3();
+  activeCamera.getWorldDirection(camDir);
+  dragPlane.setFromNormalAndCoplanarPoint(camDir.negate(), handleWorldPos);
+}
+
+function onHandleDrag(clientX, clientY) {
+  if (!isDraggingHandle || !activeDragHandle || selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry) return;
+
+  const { rect, cam } = getPointerRayContext(clientX, clientY);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+
+  const planeHit = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(dragPlane, planeHit)) return;
+
+  const def = activeDragHandle;
+  const axis = def.axis;
+  const dir = def.dir;
+
+  const initialHandlePos = dragStartBox.getCenter(new THREE.Vector3());
+  if (axis === 'x') initialHandlePos.x += (dir * (dragStartBox.max.x - dragStartBox.min.x) / 2);
+  else if (axis === 'y') initialHandlePos.y += (dir * (dragStartBox.max.y - dragStartBox.min.y) / 2);
+  else if (axis === 'z') initialHandlePos.z += (dir * (dragStartBox.max.z - dragStartBox.min.z) / 2);
+
+  const delta = (planeHit[axis] - initialHandlePos[axis]) * dir;
+
+  const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
+  const startSize = baseSize * Math.abs(dragStartScale[axis]);
+  let newSize = Math.max(1, startSize + delta);
+
+  if (snapEnabled) {
+    newSize = Math.max(snapGridStep, Math.round(newSize / snapGridStep) * snapGridStep);
+  }
+
+  let currentEdgePos = (dir === 1) ? (dragStartBox.min[axis] + newSize) : (dragStartBox.max[axis] - newSize);
+
+  // Escanear bordes vecinos para saber dónde está el TOPE y cuánto le falta
+  const snapDist = snapGridStep || 10;
+  let nearestTargetEdge = null;
+  let minRemDist = Infinity;
+  let bestNeighborBox = null;
+
+  sceneObjects.forEach((other, otherId) => {
+    if (otherId === selectedId || other.kind === 'null' || !other.visible) return;
+    if (isDescendantOf(otherId, selectedId) || isDescendantOf(selectedId, otherId)) return;
+
+    const boxB = new THREE.Box3().setFromObject(other.mesh);
+    const candidateEdges = [boxB.min[axis], boxB.max[axis]];
+    if (axis === 'y') candidateEdges.push(0);
+
+    candidateEdges.forEach(targetVal => {
+      const rem = Math.abs(targetVal - currentEdgePos);
+      if (rem < minRemDist) {
+        minRemDist = rem;
+        nearestTargetEdge = targetVal;
+        bestNeighborBox = boxB;
+      }
+    });
+  });
+
+  let isTope = false;
+  if (nearestTargetEdge !== null && minRemDist <= snapDist) {
+    isTope = true;
+    if (dir === 1) newSize = Math.max(1, nearestTargetEdge - dragStartBox.min[axis]);
+    else newSize = Math.max(1, dragStartBox.max[axis] - nearestTargetEdge);
+    currentEdgePos = nearestTargetEdge;
+    minRemDist = 0;
+  }
+
+  // Redimensionar anclando el lado opuesto
+  entry.mesh.scale[axis] = newSize / baseSize;
+  if (dir === 1) {
+    entry.mesh.position[axis] = dragStartBox.min[axis] + newSize / 2;
+  } else {
+    entry.mesh.position[axis] = dragStartBox.max[axis] - newSize / 2;
+  }
+
+  const currentBox = new THREE.Box3().setFromObject(entry.mesh);
+  const currentCenter = currentBox.getCenter(new THREE.Vector3());
+  const handlePos = currentCenter.clone();
+  handlePos[axis] = currentEdgePos;
+
+  // 1. Mostrar Medida Actual (ej: "462 ✎")
+  const sizeVal = Math.round(newSize);
+  showHudBadge('size', `${sizeVal} <span class="hud-icon">✎</span>`, handlePos, 'size');
+
+  // 2. Mostrar Cuánto le falta al Tope con línea de cotas punteada (ej: "106 mm" o "0 TOPE")
+  if (nearestTargetEdge !== null && bestNeighborBox) {
+    const p1 = handlePos.clone();
+    const p2 = handlePos.clone();
+    p2[axis] = nearestTargetEdge;
+
+    setDashedLine(p1, p2);
+
+    const midPos = p1.clone().add(p2).multiplyScalar(0.5);
+    const remVal = Math.round(minRemDist);
+    const remText = isTope ? `0 TOPE` : `${remVal} mm`;
+    showHudBadge('rem', remText, midPos, 'rem', isTope);
+  } else {
+    hideDashedLine();
+  }
+
+  updateHandles(selectedId);
+  updateTransformInputs();
+}
+
+function stopHandleDrag() {
+  if (!isDraggingHandle) return;
+  isDraggingHandle = false;
+  activeDragHandle = null;
+  orbit.enabled = true;
+  clearDimensionHUD();
+  if (selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && toolMode !== 'sculpt' && toolMode !== 'hair') transform.attach(entry.mesh);
+    updateHandles(selectedId);
+  }
+  pushHistory();
+}
+
 function applyLiveFurnitureSnap(id) {
   const entry = sceneObjects.get(id);
   if (!entry || entry.kind === 'null') {
@@ -973,81 +1371,8 @@ function applyLiveFurnitureSnap(id) {
     );
   }
 
-  if (toolMode === 'scale') {
-    // HARD LOCK SNAPPING EN MODO ESCALAR (Para muebles y tablas):
-    sceneObjects.forEach((other, otherId) => {
-      if (otherId === id || other.kind === 'null' || !other.visible) return;
-      if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
-
-      const boxB = new THREE.Box3().setFromObject(other.mesh);
-      const bb = entry.mesh.geometry?.boundingBox || new THREE.Box3().setFromBufferAttribute(entry.mesh.geometry.attributes.position);
-      const baseW = Math.max(0.1, bb.max.x - bb.min.x);
-      const baseH = Math.max(0.1, bb.max.y - bb.min.y);
-      const baseD = Math.max(0.1, bb.max.z - bb.min.z);
-
-      // Snap X (borde derecho o izquierdo al ras del otro objeto)
-      [boxB.min.x, boxB.max.x].forEach(targetX => {
-        if (Math.abs(boxA.max.x - targetX) <= snapDist) {
-          const newW = targetX - boxA.min.x;
-          if (newW > 1) {
-            entry.mesh.scale.x = newW / baseW;
-            entry.mesh.position.x = boxA.min.x + newW / 2;
-            snapped = true;
-            snapContactBox = new THREE.Box3(
-              new THREE.Vector3(targetX - 0.5, boxA.min.y, boxA.min.z),
-              new THREE.Vector3(targetX + 0.5, boxA.max.y, boxA.max.z)
-            );
-          }
-        } else if (Math.abs(boxA.min.x - targetX) <= snapDist) {
-          const newW = boxA.max.x - targetX;
-          if (newW > 1) {
-            entry.mesh.scale.x = newW / baseW;
-            entry.mesh.position.x = targetX + newW / 2;
-            snapped = true;
-            snapContactBox = new THREE.Box3(
-              new THREE.Vector3(targetX - 0.5, boxA.min.y, boxA.min.z),
-              new THREE.Vector3(targetX + 0.5, boxA.max.y, boxA.max.z)
-            );
-          }
-        }
-      });
-
-      // Snap Y (altura al ras del otro mueble o al suelo)
-      [0, boxB.min.y, boxB.max.y].forEach(targetY => {
-        if (Math.abs(boxA.max.y - targetY) <= snapDist) {
-          const newH = targetY - boxA.min.y;
-          if (newH > 1) {
-            entry.mesh.scale.y = newH / baseH;
-            entry.mesh.position.y = boxA.min.y + newH / 2;
-            snapped = true;
-            snapContactBox = new THREE.Box3(
-              new THREE.Vector3(boxA.min.x, targetY - 0.5, boxA.min.z),
-              new THREE.Vector3(boxA.max.x, targetY + 0.5, boxA.max.z)
-            );
-          }
-        }
-      });
-
-      // Snap Z (profundidad al ras de la otra tabla)
-      [boxB.min.z, boxB.max.z].forEach(targetZ => {
-        if (Math.abs(boxA.max.z - targetZ) <= snapDist) {
-          const newD = targetZ - boxA.min.z;
-          if (newD > 1) {
-            entry.mesh.scale.z = newD / baseD;
-            entry.mesh.position.z = boxA.min.z + newD / 2;
-            snapped = true;
-            snapContactBox = new THREE.Box3(
-              new THREE.Vector3(boxA.min.x, boxA.min.y, targetZ - 0.5),
-              new THREE.Vector3(boxA.max.x, boxA.max.y, targetZ + 0.5)
-            );
-          }
-        }
-      });
-    });
-
-  } else {
-    // 2. Snap magnético de caras y esquinas a otros objetos vecinos
-    sceneObjects.forEach((other, otherId) => {
+  // 2. Snap magnético de caras y esquinas a otros objetos vecinos
+  sceneObjects.forEach((other, otherId) => {
     if (otherId === id || other.kind === 'null' || !other.visible) return;
     if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
 
@@ -1057,7 +1382,7 @@ function applyLiveFurnitureSnap(id) {
     const overlapY = (boxA.min.y < boxB.max.y + snapDist) && (boxA.max.y > boxB.min.y - snapDist);
     const overlapZ = (boxA.min.z < boxB.max.z + snapDist) && (boxA.max.z > boxB.min.z - snapDist);
 
-    // X Face contact (Right face of A touches Left face of B or vice versa)
+    // X Face contact
     if (overlapY && overlapZ) {
       if (Math.abs(boxA.max.x - boxB.min.x) <= snapDist) {
         const diff = boxA.max.x - boxB.min.x;
@@ -1080,7 +1405,7 @@ function applyLiveFurnitureSnap(id) {
       }
     }
 
-    // Y Face contact (Bottom of A sits on Top of B or vice versa)
+    // Y Face contact (apilado de muebles / tablas)
     if (overlapX && overlapZ) {
       if (Math.abs(boxA.min.y - boxB.max.y) <= snapDist) {
         const diff = boxA.min.y - boxB.max.y;
@@ -1103,7 +1428,7 @@ function applyLiveFurnitureSnap(id) {
       }
     }
 
-    // Z Face contact (Front face touches Back face)
+    // Z Face contact
     if (overlapX && overlapY) {
       if (Math.abs(boxA.max.z - boxB.min.z) <= snapDist) {
         const diff = boxA.max.z - boxB.min.z;
@@ -1126,7 +1451,6 @@ function applyLiveFurnitureSnap(id) {
       }
     }
   });
-  }
 
   if (snapped && snapContactBox) {
     showSnapGuide(snapContactBox);
@@ -1174,8 +1498,65 @@ transform.addEventListener('dragging-changed', (e) => {
     if (snapEnabled && selectedId != null) {
       applyLiveFurnitureSnap(selectedId);
     }
-    hideSnapGuides();
+    clearDimensionHUD();
     pushHistory();
+  }
+});
+
+// Medición de separación en vivo durante el desplazamiento (Translate)
+transform.addEventListener('objectChange', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind === 'null') return;
+
+  if (snapEnabled) {
+    applyLiveFurnitureSnap(selectedId);
+  }
+  updateTransformInputs();
+  updateHandles(selectedId);
+
+  // Si estamos moviendo (Translate), calcular distancia al mueble/piso más cercano
+  if (toolMode === 'translate') {
+    const boxA = new THREE.Box3().setFromObject(entry.mesh);
+    const centerA = boxA.getCenter(new THREE.Vector3());
+
+    let closestDist = Infinity;
+    let pointStart = null;
+    let pointEnd = null;
+
+    // Distancia vertical a tabla inferior o suelo
+    sceneObjects.forEach((other, otherId) => {
+      if (otherId === selectedId || other.kind === 'null' || !other.visible) return;
+      if (isDescendantOf(otherId, selectedId) || isDescendantOf(selectedId, otherId)) return;
+
+      const boxB = new THREE.Box3().setFromObject(other.mesh);
+      const overlapXZ = (boxA.min.x < boxB.max.x) && (boxA.max.x > boxB.min.x) && (boxA.min.z < boxB.max.z) && (boxA.max.z > boxB.min.z);
+
+      if (overlapXZ && boxA.min.y >= boxB.max.y) {
+        const gap = boxA.min.y - boxB.max.y;
+        if (gap < closestDist) {
+          closestDist = gap;
+          pointStart = new THREE.Vector3(centerA.x, boxB.max.y, centerA.z);
+          pointEnd = new THREE.Vector3(centerA.x, boxA.min.y, centerA.z);
+        }
+      }
+    });
+
+    if (!pointStart && boxA.min.y > 0) {
+      closestDist = boxA.min.y;
+      pointStart = new THREE.Vector3(centerA.x, 0, centerA.z);
+      pointEnd = new THREE.Vector3(centerA.x, boxA.min.y, centerA.z);
+    }
+
+    if (pointStart && pointEnd && closestDist > 0.5) {
+      setDashedLine(pointStart, pointEnd);
+      const midPos = pointStart.clone().add(pointEnd).multiplyScalar(0.5);
+      showHudBadge('dist', `${Math.round(closestDist)} mm`, midPos, 'dist');
+    } else {
+      hideDashedLine();
+      const b = document.getElementById('hud_badge_dist');
+      if (b) b.style.display = 'none';
+    }
   }
 });
 
@@ -1603,7 +1984,20 @@ function snapshotScene() {
       roughness: e.mesh.material ? e.mesh.material.roughness : null,
       metalness: e.mesh.material ? e.mesh.material.metalness : null,
       opacity: e.mesh.material ? e.mesh.material.opacity : null,
-      wireframe: e.mesh.material ? !!e.mesh.material.wireframe : null
+      wireframe: e.mesh.material ? !!e.mesh.material.wireframe : null,
+      clonerMode: e.clonerMode || null,
+      clonerCount: e.clonerCount != null ? e.clonerCount : null,
+      clonerSourceId: e.clonerSourceId != null ? e.clonerSourceId : null,
+      clonerChildIds: e.clonerChildIds ? [...e.clonerChildIds] : null,
+      sepX: e.sepX != null ? e.sepX : null,
+      sepY: e.sepY != null ? e.sepY : null,
+      sepZ: e.sepZ != null ? e.sepZ : null,
+      radius: e.radius != null ? e.radius : null,
+      rotCopies: e.rotCopies != null ? e.rotCopies : null,
+      symmetrySourceId: e.symmetrySourceId != null ? e.symmetrySourceId : null,
+      symAxis: e.symAxis || null,
+      symOffset: e.symOffset != null ? e.symOffset : null,
+      isMirrorOf: e.isMirrorOf != null ? e.isMirrorOf : null
     };
     if (e.kind === 'hair' && e.mesh.geometry) {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
@@ -1648,7 +2042,20 @@ function rebuildSceneFrom(snap) {
     }
     scene.add(built.node);
     built.pickMesh.userData.ownerId = s.id;
-    sceneObjects.set(s.id, { id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh, visible: s.visible, parentId: s.parentId != null ? s.parentId : null, sculpted, name: s.name || null, collapsed: !!s.collapsed });
+    sceneObjects.set(s.id, {
+      id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
+      visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
+      sculpted, name: s.name || null, collapsed: !!s.collapsed,
+      clonerMode: s.clonerMode || null,
+      clonerCount: s.clonerCount != null ? s.clonerCount : null,
+      clonerSourceId: s.clonerSourceId != null ? s.clonerSourceId : null,
+      clonerChildIds: s.clonerChildIds ? [...s.clonerChildIds] : null,
+      sepX: s.sepX, sepY: s.sepY, sepZ: s.sepZ,
+      radius: s.radius, rotCopies: s.rotCopies,
+      symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
+      symAxis: s.symAxis, symOffset: s.symOffset,
+      isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null
+    });
     if (s.id > maxId) maxId = s.id;
   });
   // Segunda pasada: aplicar quien esta adentro de que grupo -- usa .add()
@@ -2077,6 +2484,22 @@ function finishHairStroke() {
   pushHistory();
 }
 
+// Interacción de Tiradores Directos (Push-Pull Handles)
+wrap.addEventListener('pointerdown', (e) => {
+  if (handleGroup.visible && selectedId != null && !transform.dragging && toolMode !== 'sculpt' && toolMode !== 'hair') {
+    const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, cam);
+    const hits = raycaster.intersectObjects(handleMeshes, false);
+    if (hits.length > 0) {
+      e.stopPropagation();
+      startHandleDrag(hits[0].object);
+      return;
+    }
+  }
+}, { capture: true });
+
 wrap.addEventListener('pointerdown', (e) => {
   if (toolMode !== 'hair') return;
   clearHairPreview();
@@ -2087,11 +2510,31 @@ wrap.addEventListener('pointerdown', (e) => {
 }, { capture: true });
 
 window.addEventListener('pointermove', (e) => {
+  if (isDraggingHandle) {
+    onHandleDrag(e.clientX, e.clientY);
+    return;
+  }
+  if (!hairDragging && !sculptDragging && handleGroup.visible && selectedId != null) {
+    const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, cam);
+    const hits = raycaster.intersectObjects(handleMeshes, false);
+    if (hits.length > 0) {
+      const def = hits[0].object.userData.def;
+      wrap.style.cursor = def.axis === 'y' ? 'ns-resize' : (def.axis === 'x' ? 'ew-resize' : 'nwse-resize');
+    } else {
+      wrap.style.cursor = 'default';
+    }
+  }
   if (!hairDragging) return;
   pendingHairPoint = { clientX: e.clientX, clientY: e.clientY };
 });
 
 window.addEventListener('pointerup', () => {
+  if (isDraggingHandle) {
+    stopHandleDrag();
+  }
   if (!hairDragging) return;
   hairDragging = false;
   pendingHairPoint = null;
@@ -2635,6 +3078,7 @@ function animate() {
   } else {
     renderer.render(scene, activeCamera);
   }
+  updateHUDPositions();
 }
 animate();
 
@@ -2706,17 +3150,31 @@ function cloneEntryAt(src, positionWorld) {
   return newId;
 }
 
-// Create a Null group and parent all given IDs into it
-function groupIds(ids, groupName) {
+// Create a Null group, center its pivot on all children, and parent all given IDs into it
+function groupIds(ids, groupName, metadata = {}) {
   const nullBuilt = buildObject('null', undefined, {});
+
+  // Calcular el centro geométrico de todas las figuras
+  const groupBBox = new THREE.Box3();
+  ids.forEach(id => {
+    const e = sceneObjects.get(id);
+    if (e) groupBBox.expandByObject(e.mesh);
+  });
+  const center = new THREE.Vector3();
+  groupBBox.getCenter(center);
+  nullBuilt.node.position.copy(center);
+
   scene.add(nullBuilt.node);
   const nullId = objIdCounter++;
   nullBuilt.pickMesh.userData.ownerId = nullId;
-  sceneObjects.set(nullId, {
+  const nullEntry = {
     id: nullId, kind: 'null', mesh: nullBuilt.node, pickMesh: nullBuilt.pickMesh,
     visible: true, parentId: null, sculpted: false,
-    name: groupName, collapsed: false
-  });
+    name: groupName, collapsed: false,
+    ...metadata
+  };
+  sceneObjects.set(nullId, nullEntry);
+
   ids.forEach(id => {
     const e = sceneObjects.get(id);
     if (!e) return;
@@ -2747,8 +3205,18 @@ if (arrayApplyBtn) {
         const pos = srcPos.clone().add(new THREE.Vector3(ox * i, oy * i, oz * i));
         createdIds.push(cloneEntryAt(src, pos));
       }
-      const nullId = groupIds(createdIds, `🔁 Lineal (${srcLabel})`);
-      renderLayerList(); selectObject(nullId); pushHistory();
+      const nullId = groupIds(createdIds, `🔁 Lineal (${srcLabel})`, {
+        clonerMode: 'linear',
+        clonerCount: count,
+        clonerSourceId: selectedId,
+        clonerChildIds: createdIds.filter(id => id !== selectedId),
+        sepX: ox,
+        sepY: oy,
+        sepZ: oz
+      });
+      renderLayerList();
+      selectObject(nullId);
+      pushHistory();
 
     } else if (mode === 'circular') {
       const radius   = parseFloat(document.getElementById('arrayRadius').value) || 120;
@@ -2782,8 +3250,17 @@ if (arrayApplyBtn) {
         }
         createdIds.push(newId);
       }
-      const nullId = groupIds(createdIds, `🔁 Circular (${srcLabel})`);
-      renderLayerList(); selectObject(nullId); pushHistory();
+      const nullId = groupIds(createdIds, `🔁 Circular (${srcLabel})`, {
+        clonerMode: 'circular',
+        clonerCount: count,
+        clonerSourceId: selectedId,
+        clonerChildIds: createdIds.filter(id => id !== selectedId),
+        radius: radius,
+        rotCopies: doRotate
+      });
+      renderLayerList();
+      selectObject(nullId);
+      pushHistory();
 
     } else if (mode === 'grid') {
       const gx = Math.max(1, parseInt(document.getElementById('arrayGridX').value) || 3);
@@ -2806,8 +3283,18 @@ if (arrayApplyBtn) {
           }
         }
       }
-      const nullId = groupIds(createdIds, `🔁 Cuadrícula (${srcLabel})`);
-      renderLayerList(); selectObject(nullId); pushHistory();
+      const nullId = groupIds(createdIds, `🔁 Cuadrícula (${srcLabel})`, {
+        clonerMode: 'grid',
+        clonerCount: count,
+        clonerSourceId: selectedId,
+        clonerChildIds: createdIds.filter(id => id !== selectedId),
+        sepX: sx,
+        sepY: sy,
+        sepZ: sz
+      });
+      renderLayerList();
+      selectObject(nullId);
+      pushHistory();
     }
 
     arrayModal.classList.remove('show');

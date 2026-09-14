@@ -274,6 +274,41 @@
   .vp-divider-v { top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px; }
   .vp-divider-h { left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; }
 
+  /* 3D Real-time Dimension & Distance HUD */
+  #dimensionHud {
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 10;
+  }
+  .hud-badge {
+    position: absolute; transform: translate(-50%, -50%);
+    background: #1c212b; color: #38bdf8; border: 1.5px solid #38bdf8;
+    border-radius: 12px; padding: 2px 7px; font-size: 11px; font-weight: 700;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.6);
+    white-space: nowrap; display: flex; align-items: center; gap: 4px;
+    user-select: none; pointer-events: none;
+    transition: transform 0.04s ease-out, border-color 0.15s ease;
+  }
+  .hud-badge .hud-icon {
+    font-size: 9px; color: #94a3b8; margin-left: 2px;
+  }
+  .hud-badge-size {
+    background: #181e29; color: #38bdf8; border-color: #38bdf8;
+  }
+  .hud-badge-size.active-orange {
+    color: #fb923c; border-color: #fb923c;
+  }
+  .hud-badge-rem {
+    background: #0d2322; color: #2dd4bf; border-color: #2dd4bf;
+    font-size: 10px; padding: 1px 6px; border-radius: 10px;
+  }
+  .hud-badge-rem.tope {
+    background: #064e3b; color: #34d399; border-color: #10b981;
+    font-weight: 800;
+  }
+  .hud-badge-dist {
+    background: #0f172a; color: #38bdf8; border-color: #0284c7;
+  }
+
   /* Modal */
   .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.65);
@@ -394,6 +429,7 @@
 
   <!-- Viewport Canvas -->
   <div id="canvasWrap">
+    <div id="dimensionHud"></div>
     <div class="vp-divider vp-divider-v"></div>
     <div class="vp-divider vp-divider-h"></div>
     <div class="vp-label vp-tl">3D</div>
@@ -454,6 +490,17 @@
               <div class="axis-input-wrap"><span class="axis-tag tag-x">An</span><input id="sizeX" class="axis-input" type="number" step="1" min="1" placeholder="Ancho"></div>
               <div class="axis-input-wrap"><span class="axis-tag tag-y">Al</span><input id="sizeY" class="axis-input" type="number" step="1" min="1" placeholder="Alto"></div>
               <div class="axis-input-wrap"><span class="axis-tag tag-z">Pr</span><input id="sizeZ" class="axis-input" type="number" step="1" min="1" placeholder="Prof."></div>
+            </div>
+          </div>
+          <div class="prop-row" id="pivotRow">
+            <label>🎯 Mover Eje / Pivote</label>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
+              <button id="pivotBaseBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Mover eje a la base inferior">⬇️ Base</button>
+              <button id="pivotCenterBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Centrar eje en el centro geométrico">🎯 Centro</button>
+              <button id="pivotTopBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Mover eje al tope superior">⬆️ Tope</button>
+              <button id="pivotLeftBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Mover eje al lado izquierdo">⬅️ Izq.</button>
+              <button id="pivotRightBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Mover eje al lado derecho">➡️ Der.</button>
+              <button id="pivotFrontBtn" class="context-btn" style="padding:4px 2px; font-size:10px; justify-content:center;" title="Mover eje al frente">🔲 Frente</button>
             </div>
           </div>
         </div>
