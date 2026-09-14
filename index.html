@@ -41,14 +41,26 @@
     background: rgba(20,22,24,0.92); z-index: 10;
     display: flex; flex-direction: column;
     padding: 10px 8px; box-sizing: border-box; gap: 10px;
-    overflow-y: auto;
+    overflow-y: auto; transition: transform 0.2s ease;
   }
+  #sidePanel.collapsed { transform: translateX(100%); pointer-events: none; }
+  body.side-collapsed #canvasWrap { right: 0; }
+  body.side-collapsed #toolbar { right: 46px; }
+  body.side-collapsed #hint { right: 0; }
+
+  #toggleSidePanelBtn {
+    position: fixed; top: 8px; right: 8px; z-index: 15;
+    width: 36px; height: 36px; padding: 0; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 10px;
+  }
+
   #sidePanel h3 { color: #ccc; font-size: 12px; margin: 0 0 4px; text-transform: uppercase; letter-spacing: 0.05em; }
   .section { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid #3d4348; }
   .section:last-child { border-bottom: none; }
 
   .view-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .vbtn { font-size: 14px; padding: 10px 6px; border: 2px solid #555; border-radius: 10px; background: #3a3f44; color: #eee; -webkit-tap-highlight-color: transparent; }
+  .vbtn { font-size: 14px; padding: 10px 6px; border: 2px solid #555; border-radius: 10px; background: #3a3f44; color: #eee; -webkit-tap-highlight-color: transparent; cursor: pointer; }
 
   .file-grid { display: flex; flex-direction: column; gap: 6px; }
   .file-grid .hbtn { width: 100%; box-sizing: border-box; }
@@ -57,7 +69,7 @@
   #lightRange { flex: 1; }
 
   .brush-slider { display: flex; align-items: center; gap: 6px; color: #ccc; font-size: 12px; white-space: nowrap; }
-  .brush-slider input { width: 70px; }
+  .brush-slider input[type="range"] { width: 60px; }
 
   #layerEmpty { color: #888; font-size: 13px; }
   .layer-row {
@@ -72,12 +84,13 @@
   .layer-actions .layer-btn { font-size: 14px; padding: 3px; }
   .collapse-btn { background: none; border: none; font-size: 12px; color: #bbb; padding: 2px 4px; cursor: pointer; }
   .layer-label { flex: 1; color: #eee; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .layer-btn { background: none; border: none; font-size: 17px; padding: 4px; color: #ddd; }
+  .layer-btn { background: none; border: none; font-size: 17px; padding: 4px; color: #ddd; cursor: pointer; }
 
   #propsPanel { display: none; flex-direction: column; gap: 6px; background: #33383d; border-radius: 10px; padding: 8px; }
   #propsPanel.show { display: flex; }
-  #propsPanel label { color: #ccc; font-size: 13px; }
-  #propsColor { width: 100%; height: 34px; border: none; border-radius: 6px; background: none; }
+  #propsPanel label { color: #ccc; font-size: 12px; display: flex; justify-content: space-between; align-items: center; }
+  #propsPanel input[type="range"] { width: 90px; }
+  #propsColor { width: 100%; height: 34px; border: none; border-radius: 6px; background: none; cursor: pointer; }
 
   .vp-label {
     position: absolute; padding: 1px 6px; background: rgba(0,0,0,0.45);
@@ -96,7 +109,7 @@
 
   #hint {
     position: fixed; bottom: 6px; left: 0; right: 220px; text-align: center;
-    color: #bbb; font-size: 12px; z-index: 10; pointer-events: none;
+    color: #bbb; font-size: 11px; z-index: 10; pointer-events: none; padding: 0 10px;
   }
 
   .modal-overlay {
@@ -120,6 +133,7 @@
 </style>
 </head>
 <body>
+  <button id="toggleSidePanelBtn" class="hbtn iconbtn" title="Mostrar/ocultar panel">▶</button>
   <div id="toolbar">
     <div class="row">
       <button class="abtn" data-add="cube">🧊 Cubo</button>
@@ -131,21 +145,23 @@
       <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
     </div>
     <div class="row">
-      <button class="tbtn" data-mode="translate">↔️ Mover</button>
-      <button class="tbtn" data-mode="rotate">🔄 Rotar</button>
-      <button class="tbtn" data-mode="scale">↕️ Escalar</button>
+      <button class="tbtn" data-mode="translate">↔️ Mover (G)</button>
+      <button class="tbtn" data-mode="rotate">🔄 Rotar (R)</button>
+      <button class="tbtn" data-mode="scale">↕️ Escalar (S)</button>
       <button class="tbtn" data-mode="sculpt">🖌️ Esculpir</button>
       <button class="tbtn" data-mode="hair">💇 Pelo</button>
-      <button id="undoBtn" class="hbtn iconbtn" title="Deshacer">↶</button>
-      <button id="redoBtn" class="hbtn iconbtn" title="Rehacer">↷</button>
+      <button id="undoBtn" class="hbtn iconbtn" title="Deshacer (Ctrl+Z)">↶</button>
+      <button id="redoBtn" class="hbtn iconbtn" title="Rehacer (Ctrl+Y)">↷</button>
     </div>
     <div class="row" id="brushRow" style="display:none;">
       <button class="tbtn active" data-brush="push">⬆️ Empujar</button>
       <button class="tbtn" data-brush="pull">⬇️ Hundir</button>
       <button class="tbtn" data-brush="smooth">🌊 Suavizar</button>
       <button class="tbtn" data-brush="pinch">🤏 Pellizcar</button>
+      <button class="tbtn" data-brush="flatten">🛏️ Aplanar</button>
       <label class="brush-slider">Tamaño<input id="brushSize" type="range" min="8" max="60" step="1" value="24"></label>
       <label class="brush-slider">Fuerza<input id="brushStrength" type="range" min="1" max="10" step="1" value="4"></label>
+      <label class="brush-slider" style="margin-left:4px;"><input id="symmetryX" type="checkbox"> 🪞 Simetría X</label>
     </div>
   </div>
 
@@ -176,15 +192,22 @@
     <div class="section">
       <h3>Archivo</h3>
       <div class="file-grid">
-        <button id="saveBtn" class="hbtn">💾 Guardar</button>
-        <button id="openBtn" class="hbtn">📂 Abrir</button>
-        <button id="exportBtn" class="hbtn">🖼️ Exportar imagen</button>
+        <button id="saveBtn" class="hbtn">💾 Guardar local</button>
+        <button id="openBtn" class="hbtn">📂 Abrir local</button>
+        <button id="exportBtn" class="hbtn">🖼️ Exportar imagen PNG</button>
+        <button id="exportObjBtn" class="hbtn">📦 Exportar 3D (.OBJ)</button>
+        <button id="exportJsonBtn" class="hbtn">📄 Guardar archivo JSON</button>
+        <button id="importJsonBtn" class="hbtn">📥 Cargar archivo JSON</button>
+        <input id="importJsonInput" type="file" accept=".json,.3dpro" style="display:none;">
       </div>
     </div>
 
     <div class="section">
-      <h3>💡 Luz</h3>
+      <h3>💡 Luz y Sombras</h3>
       <div id="lightRow"><input id="lightRange" type="range" min="0.4" max="2" step="0.05" value="1"></div>
+      <label style="color:#ccc; font-size:12px; display:flex; align-items:center; gap:6px; margin-top:4px;">
+        <input id="shadowToggle" type="checkbox" checked> 🌘 Sombras proyectadas
+      </label>
     </div>
 
     <div class="section" style="border-bottom:none; flex:1;">
@@ -192,13 +215,23 @@
       <div id="layerList"></div>
       <p id="layerEmpty">Todavía no agregaste nada.</p>
       <div id="propsPanel">
-        <label>Color</label>
-        <input id="propsColor" type="color" value="#e0762f">
+        <h4 style="margin:2px 0 4px; color:#ffcc33; font-size:13px;">Propiedades de Objeto</h4>
+        <label>Color <input id="propsColor" type="color" value="#e0762f"></label>
+        <label>Mate/Rugoso <input id="propsRoughness" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+        <label>Metalizado <input id="propsMetalness" type="range" min="0" max="1" step="0.05" value="0.05"></label>
+        <label>Opacidad <input id="propsOpacity" type="range" min="0.1" max="1" step="0.05" value="1"></label>
+        <label style="cursor:pointer;"><input id="propsWireframe" type="checkbox"> 🕸️ Estructura (Wireframe)</label>
+        
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:4px; margin-top:4px;">
+          <button id="alignOriginBtn" class="vbtn" style="font-size:12px; padding:6px;" title="Llevar al centro (0,y,0)">🎯 Centrar</button>
+          <button id="alignGroundBtn" class="vbtn" style="font-size:12px; padding:6px;" title="Apoyar en el suelo">⬇️ Al suelo</button>
+        </div>
+        <button id="focusCamBtn" class="vbtn" style="font-size:12px; padding:6px; width:100%; margin-top:2px;" title="Centrar cámara en el objeto (F)">🔍 Enfocar cámara (F)</button>
       </div>
     </div>
   </div>
 
-  <div id="hint">Tocá una figura o su nombre en la lista para seleccionarla · arrastrá el fondo para orbitar · en Escalar, un solo brazo distorsiona esa figura solo en esa dirección · agregá un 🗂️ Grupo (Nulo), seleccionalo y tocá 🔗 en otras figuras para meterlas adentro: al mover el grupo, se mueven todas juntas · en 🖌️ Esculpir, elegí seleccionar la figura y arrastrá el dedo sobre ella para deformarla · en 💇 Pelo, arrastrá el lápiz para dibujar un mechón (nace grueso y se afina solo)</div>
+  <div id="hint">Atajos: <b>G</b> Mover · <b>R</b> Rotar · <b>S</b> Escalar · <b>F</b> Enfocar · <b>Del</b> Borrar · <b>Shift+D</b> Clonar · <b>Ctrl+Z/Y</b> Deshacer/Rehacer · En 🖌️ Esculpir podés activar 🪞 Simetría X</div>
 
   <div id="openModal" class="modal-overlay">
     <div class="modal-box">

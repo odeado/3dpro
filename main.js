@@ -13,6 +13,21 @@ const layerList = document.getElementById('layerList');
 const layerEmpty = document.getElementById('layerEmpty');
 const propsPanel = document.getElementById('propsPanel');
 const propsColor = document.getElementById('propsColor');
+const propsRoughness = document.getElementById('propsRoughness');
+const propsMetalness = document.getElementById('propsMetalness');
+const propsOpacity = document.getElementById('propsOpacity');
+const propsWireframe = document.getElementById('propsWireframe');
+const alignOriginBtn = document.getElementById('alignOriginBtn');
+const alignGroundBtn = document.getElementById('alignGroundBtn');
+const focusCamBtn = document.getElementById('focusCamBtn');
+const exportObjBtn = document.getElementById('exportObjBtn');
+const exportJsonBtn = document.getElementById('exportJsonBtn');
+const importJsonBtn = document.getElementById('importJsonBtn');
+const importJsonInput = document.getElementById('importJsonInput');
+const shadowToggle = document.getElementById('shadowToggle');
+const toggleSidePanelBtn = document.getElementById('toggleSidePanelBtn');
+const sidePanel = document.getElementById('sidePanel');
+const symmetryXInput = document.getElementById('symmetryX');
 const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 const lightRange = document.getElementById('lightRange');
@@ -56,15 +71,37 @@ let activeQuadrant = 'tl';
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 wrap.appendChild(renderer.domElement);
 
 const BASE_DIR_INTENSITY = 1.1;
 const BASE_AMBIENT_INTENSITY = 0.45;
 const dirLight = new THREE.DirectionalLight(0xffffff, BASE_DIR_INTENSITY);
 dirLight.position.set(120, 200, 150);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 1024;
+dirLight.shadow.mapSize.height = 1024;
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 1000;
+const shadowDist = 300;
+dirLight.shadow.camera.left = -shadowDist;
+dirLight.shadow.camera.right = shadowDist;
+dirLight.shadow.camera.top = shadowDist;
+dirLight.shadow.camera.bottom = -shadowDist;
+dirLight.shadow.bias = -0.0005;
 scene.add(dirLight);
+
 const ambientLight = new THREE.AmbientLight(0xffffff, BASE_AMBIENT_INTENSITY);
 scene.add(ambientLight);
+
+const groundGeo = new THREE.PlaneGeometry(800, 800);
+const groundMat = new THREE.ShadowMaterial({ opacity: 0.25 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.1;
+ground.receiveShadow = true;
+scene.add(ground);
 
 const grid = new THREE.GridHelper(400, 20, 0x555555, 0x3d4146);
 scene.add(grid);
@@ -205,16 +242,38 @@ function buildObject(kind, colorHex, extra) {
     group.add(hitMesh);
     return { node: group, pickMesh: hitMesh };
   }
+
+  const roughness = (extra && extra.roughness != null) ? extra.roughness : (kind === 'hair' ? 0.6 : 0.5);
+  const metalness = (extra && extra.metalness != null) ? extra.metalness : 0.05;
+  const opacity = (extra && extra.opacity != null) ? extra.opacity : 1.0;
+  const wireframe = (extra && extra.wireframe != null) ? !!extra.wireframe : false;
+
   if (kind === 'hair') {
     const geo = extra && extra.geometryData ? geometryFromSerialized(extra.geometryData) : new THREE.BufferGeometry();
-    const mat = new THREE.MeshStandardMaterial({ color: colorHex != null ? colorHex : HAIR_DEFAULT_COLOR, roughness: 0.6, metalness: 0.05, side: THREE.DoubleSide });
+    const mat = new THREE.MeshStandardMaterial({
+      color: colorHex != null ? colorHex : HAIR_DEFAULT_COLOR,
+      roughness, metalness, opacity,
+      transparent: opacity < 1,
+      wireframe,
+      side: THREE.DoubleSide
+    });
     const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     return { node: mesh, pickMesh: mesh };
   }
+
   const geo = geometryFor(kind);
-  const mat = new THREE.MeshStandardMaterial({ color: colorHex != null ? colorHex : DEFAULT_COLOR, roughness: 0.5, metalness: 0.05 });
-  if (kind === 'plane') mat.side = THREE.DoubleSide;
+  const mat = new THREE.MeshStandardMaterial({
+    color: colorHex != null ? colorHex : DEFAULT_COLOR,
+    roughness, metalness, opacity,
+    transparent: opacity < 1,
+    wireframe,
+    side: kind === 'plane' ? THREE.DoubleSide : THREE.FrontSide
+  });
   const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   return { node: mesh, pickMesh: mesh };
 }
 
@@ -279,9 +338,16 @@ function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
   const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
-  const built = src.kind === 'hair'
-    ? buildObject('hair', colorHex, { geometryData: serializeGeometry(src.mesh.geometry) })
-    : buildObject(src.kind, colorHex);
+  const extraOpts = {
+    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
+    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
+    opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
+    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
+  };
+  if (src.kind === 'hair') {
+    extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  }
+  const built = buildObject(src.kind, colorHex, extraOpts);
   built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
@@ -426,6 +492,10 @@ function selectObject(id) {
     if (entry.mesh.material) {
       propsPanel.classList.add('show');
       propsColor.value = '#' + entry.mesh.material.color.getHexString();
+      propsRoughness.value = entry.mesh.material.roughness != null ? entry.mesh.material.roughness : 0.5;
+      propsMetalness.value = entry.mesh.material.metalness != null ? entry.mesh.material.metalness : 0.05;
+      propsOpacity.value = entry.mesh.material.opacity != null ? entry.mesh.material.opacity : 1.0;
+      propsWireframe.checked = !!entry.mesh.material.wireframe;
     } else {
       propsPanel.classList.remove('show');
     }
@@ -435,6 +505,96 @@ function selectObject(id) {
   }
   renderLayerList();
 }
+
+function focusCameraOnSelection() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry) return;
+  const targetPos = new THREE.Vector3();
+  entry.mesh.getWorldPosition(targetPos);
+  orbit.target.copy(targetPos);
+  
+  const offset = activeCamera.position.clone().sub(orbit.target);
+  if (offset.lengthSq() < 1) offset.set(120, 100, 160);
+  else offset.normalize().multiplyScalar(180);
+  activeCamera.position.copy(targetPos).add(offset);
+  orbit.update();
+}
+
+propsColor.addEventListener('input', () => {
+  if (selectedId != null) setColor(selectedId, propsColor.value);
+});
+propsColor.addEventListener('change', () => { pushHistory(); });
+
+propsRoughness.addEventListener('input', () => {
+  if (selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && entry.mesh.material) entry.mesh.material.roughness = parseFloat(propsRoughness.value);
+  }
+});
+propsRoughness.addEventListener('change', () => { pushHistory(); });
+
+propsMetalness.addEventListener('input', () => {
+  if (selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && entry.mesh.material) entry.mesh.material.metalness = parseFloat(propsMetalness.value);
+  }
+});
+propsMetalness.addEventListener('change', () => { pushHistory(); });
+
+propsOpacity.addEventListener('input', () => {
+  if (selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && entry.mesh.material) {
+      const val = parseFloat(propsOpacity.value);
+      entry.mesh.material.opacity = val;
+      entry.mesh.material.transparent = val < 1.0;
+    }
+  }
+});
+propsOpacity.addEventListener('change', () => { pushHistory(); });
+
+propsWireframe.addEventListener('change', () => {
+  if (selectedId != null) {
+    const entry = sceneObjects.get(selectedId);
+    if (entry && entry.mesh.material) {
+      entry.mesh.material.wireframe = propsWireframe.checked;
+      pushHistory();
+    }
+  }
+});
+
+alignOriginBtn.addEventListener('click', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry) return;
+  entry.mesh.position.x = 0;
+  entry.mesh.position.z = 0;
+  pushHistory();
+});
+
+alignGroundBtn.addEventListener('click', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind === 'null') return;
+  const box = new THREE.Box3().setFromObject(entry.mesh);
+  const minY = box.min.y;
+  entry.mesh.position.y -= minY;
+  pushHistory();
+});
+
+focusCamBtn.addEventListener('click', focusCameraOnSelection);
+
+shadowToggle.addEventListener('change', () => {
+  renderer.shadowMap.enabled = shadowToggle.checked;
+});
+
+toggleSidePanelBtn.addEventListener('click', () => {
+  sidePanel.classList.toggle('collapsed');
+  document.body.classList.toggle('side-collapsed', sidePanel.classList.contains('collapsed'));
+  toggleSidePanelBtn.textContent = sidePanel.classList.contains('collapsed') ? '◀' : '▶';
+  handleResize();
+});
 
 function renderLayerList() {
   layerList.innerHTML = '';
@@ -577,7 +737,11 @@ function snapshotScene() {
       px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
       rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
       sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
-      color: e.mesh.material ? e.mesh.material.color.getHex() : null
+      color: e.mesh.material ? e.mesh.material.color.getHex() : null,
+      roughness: e.mesh.material ? e.mesh.material.roughness : null,
+      metalness: e.mesh.material ? e.mesh.material.metalness : null,
+      opacity: e.mesh.material ? e.mesh.material.opacity : null,
+      wireframe: e.mesh.material ? !!e.mesh.material.wireframe : null
     };
     if (e.kind === 'hair' && e.mesh.geometry) {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
@@ -599,9 +763,14 @@ function rebuildSceneFrom(snap) {
   // Primera pasada: crear todo suelto (a nivel raiz) con su transform local
   // ya cargado.
   snap.forEach(s => {
-    const built = s.kind === 'hair'
-      ? buildObject('hair', s.color != null ? s.color : undefined, { geometryData: s.hairGeometry })
-      : buildObject(s.kind, s.color != null ? s.color : undefined);
+    const extraOpts = {
+      roughness: s.roughness,
+      metalness: s.metalness,
+      opacity: s.opacity,
+      wireframe: s.wireframe,
+      geometryData: s.hairGeometry
+    };
+    const built = buildObject(s.kind, s.color != null ? s.color : undefined, extraOpts);
     built.node.position.set(s.px, s.py, s.pz);
     built.node.rotation.set(s.rx, s.ry, s.rz);
     built.node.scale.set(s.sx, s.sy, s.sz);
@@ -663,9 +832,30 @@ redoBtn.addEventListener('click', () => {
   restoreSnapshot(history[historyIndex]);
 });
 window.addEventListener('keydown', (e) => {
-  if (!e.ctrlKey && !e.metaKey) return;
-  if (e.key === 'z') { e.preventDefault(); undoBtn.click(); }
-  if (e.key === 'y') { e.preventDefault(); redoBtn.click(); }
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key.toLowerCase() === 'z') { e.preventDefault(); undoBtn.click(); }
+    if (e.key.toLowerCase() === 'y') { e.preventDefault(); redoBtn.click(); }
+    return;
+  }
+
+  const key = e.key.toLowerCase();
+  if (e.shiftKey && key === 'd') {
+    e.preventDefault();
+    if (selectedId != null) cloneObject(selectedId);
+    return;
+  }
+
+  if (key === 'g') { e.preventDefault(); setMode('translate'); }
+  else if (key === 'r') { e.preventDefault(); setMode('rotate'); }
+  else if (key === 's') { e.preventDefault(); setMode('scale'); }
+  else if (key === 'f') { e.preventDefault(); focusCameraOnSelection(); }
+  else if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (selectedId != null) {
+      e.preventDefault();
+      removeObject(selectedId);
+    }
+  }
 });
 
 // --- Guardar / abrir proyectos (localStorage, sin cuenta por ahora) ---
@@ -773,6 +963,121 @@ exportBtn.addEventListener('click', () => {
   a.remove();
 });
 
+// --- Exportar 3D OBJ ---
+function exportToOBJ() {
+  let output = `# Exportado desde 3DPro Editor\n# Fecha: ${new Date().toLocaleString()}\n\n`;
+  let vertexOffset = 1;
+  let normalOffset = 1;
+  let uvOffset = 1;
+
+  sceneObjects.forEach((entry, id) => {
+    if (!entry.visible || entry.kind === 'null' || !entry.mesh) return;
+
+    const mesh = entry.mesh;
+    const name = entry.name || (KIND_LABEL[entry.kind] + '_' + id);
+    output += `o ${name.replace(/\s+/g, '_')}\n`;
+
+    const geometry = mesh.geometry.clone();
+    mesh.updateMatrixWorld(true);
+    geometry.applyMatrix4(mesh.matrixWorld);
+
+    const posAttr = geometry.attributes.position;
+    const normAttr = geometry.attributes.normal;
+    const uvAttr = geometry.attributes.uv;
+    const indexAttr = geometry.index;
+
+    if (!posAttr) return;
+
+    for (let i = 0; i < posAttr.count; i++) {
+      output += `v ${posAttr.getX(i).toFixed(4)} ${posAttr.getY(i).toFixed(4)} ${posAttr.getZ(i).toFixed(4)}\n`;
+    }
+
+    if (normAttr) {
+      for (let i = 0; i < normAttr.count; i++) {
+        output += `vn ${normAttr.getX(i).toFixed(4)} ${normAttr.getY(i).toFixed(4)} ${normAttr.getZ(i).toFixed(4)}\n`;
+      }
+    }
+
+    if (uvAttr) {
+      for (let i = 0; i < uvAttr.count; i++) {
+        output += `vt ${uvAttr.getX(i).toFixed(4)} ${uvAttr.getY(i).toFixed(4)}\n`;
+      }
+    }
+
+    if (indexAttr) {
+      const arr = indexAttr.array;
+      for (let i = 0; i < arr.length; i += 3) {
+        const v1 = arr[i] + vertexOffset;
+        const v2 = arr[i + 1] + vertexOffset;
+        const v3 = arr[i + 2] + vertexOffset;
+        if (normAttr && uvAttr) {
+          const n1 = arr[i] + normalOffset, n2 = arr[i + 1] + normalOffset, n3 = arr[i + 2] + normalOffset;
+          const t1 = arr[i] + uvOffset, t2 = arr[i + 1] + uvOffset, t3 = arr[i + 2] + uvOffset;
+          output += `f ${v1}/${t1}/${n1} ${v2}/${t2}/${n2} ${v3}/${t3}/${n3}\n`;
+        } else if (normAttr) {
+          const n1 = arr[i] + normalOffset, n2 = arr[i + 1] + normalOffset, n3 = arr[i + 2] + normalOffset;
+          output += `f ${v1}//${n1} ${v2}//${n2} ${v3}//${n3}\n`;
+        } else {
+          output += `f ${v1} ${v2} ${v3}\n`;
+        }
+      }
+    }
+
+    vertexOffset += posAttr.count;
+    if (normAttr) normalOffset += normAttr.count;
+    if (uvAttr) uvOffset += uvAttr.count;
+    output += `\n`;
+  });
+
+  const blob = new Blob([output], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `mi-modelo-3d-${Date.now()}.obj`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+exportObjBtn.addEventListener('click', exportToOBJ);
+
+exportJsonBtn.addEventListener('click', () => {
+  const jsonStr = JSON.stringify({ version: '3dpro-1.0', savedAt: Date.now(), data: snapshotScene() }, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `proyecto-3dpro-${Date.now()}.3dpro`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
+
+importJsonBtn.addEventListener('click', () => importJsonInput.click());
+
+importJsonInput.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const parsed = JSON.parse(evt.target.result);
+      const data = parsed.data || parsed;
+      if (Array.isArray(data)) {
+        rebuildSceneFrom(data);
+        history = [snapshotScene()];
+        historyIndex = 0;
+        updateHistoryButtons();
+        alert('¡Proyecto cargado exitosamente!');
+      } else {
+        alert('Archivo de proyecto no válido.');
+      }
+    } catch (err) {
+      alert('Error al leer el archivo JSON.');
+    }
+  };
+  reader.readAsText(file);
+  importJsonInput.value = '';
+});
+
 // --- Botones "Agregar" ---
 document.querySelectorAll('.abtn').forEach(btn => {
   btn.addEventListener('click', () => addPrimitive(btn.dataset.add));
@@ -878,22 +1183,35 @@ function updateHairPreview() {
   }
 }
 
-function finishHairStroke() {
-  clearHairPreview();
-  if (hairPoints.length < 2) { hairPoints = []; return; } // toque sin arrastre: no crea nada
-  const origin = hairPoints[0].clone();
-  const localPoints = hairPoints.map(p => p.clone().sub(origin));
+function createHairObjectFromPoints(pts) {
+  const origin = pts[0].clone();
+  const localPoints = pts.map(p => p.clone().sub(origin));
   const geo = buildTaperedTubeGeometry(localPoints, HAIR_ROOT_RADIUS, HAIR_TIP_RADIUS);
   const mat = new THREE.MeshStandardMaterial({ color: HAIR_DEFAULT_COLOR, roughness: 0.6, metalness: 0.05, side: THREE.DoubleSide });
+  mat.castShadow = true; mat.receiveShadow = true;
   const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true; mesh.receiveShadow = true;
   mesh.position.copy(origin);
   scene.add(mesh);
   const id = objIdCounter++;
   mesh.userData.ownerId = id;
   sceneObjects.set(id, { id, kind: 'hair', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false });
+  return id;
+}
+
+function finishHairStroke() {
+  clearHairPreview();
+  if (hairPoints.length < 2) { hairPoints = []; return; }
+  const mainId = createHairObjectFromPoints(hairPoints);
+
+  if (symmetryXInput && symmetryXInput.checked) {
+    const symPoints = hairPoints.map(p => new THREE.Vector3(-p.x, p.y, p.z));
+    createHairObjectFromPoints(symPoints);
+  }
+
   hairPoints = [];
   renderLayerList();
-  selectObject(id);
+  selectObject(mainId);
   pushHistory();
 }
 
@@ -939,7 +1257,7 @@ function getAdjacency(geometry) {
   return adj;
 }
 
-function applySculptStroke(entry, localPoint, brush, size, strength) {
+function applySculptStrokeSingle(entry, localPoint, brush, size, strength) {
   const geo = entry.mesh.geometry;
   const posAttr = geo.attributes.position;
   const normAttr = geo.attributes.normal;
@@ -947,7 +1265,7 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
 
   if (brush === 'smooth') {
     const adj = getAdjacency(geo);
-    const original = posAttr.array.slice(); // leer todo antes de escribir nada, para que el promedio no se contamine a mitad de camino
+    const original = posAttr.array.slice();
     for (let i = 0; i < posAttr.count; i++) {
       const vx = original[i * 3], vy = original[i * 3 + 1], vz = original[i * 3 + 2];
       const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
@@ -963,6 +1281,36 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
       const k = falloff * strength * 0.15;
       posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
     }
+  } else if (brush === 'flatten') {
+    let avgX = 0, avgY = 0, avgZ = 0;
+    let avgNx = 0, avgNy = 0, avgNz = 0;
+    let count = 0;
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
+      const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
+      if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= radius) {
+        avgX += vx; avgY += vy; avgZ += vz;
+        if (normAttr) { avgNx += normAttr.getX(i); avgNy += normAttr.getY(i); avgNz += normAttr.getZ(i); }
+        count++;
+      }
+    }
+    if (count > 0) {
+      avgX /= count; avgY /= count; avgZ /= count;
+      let norm = new THREE.Vector3(avgNx, avgNy, avgNz).normalize();
+      if (norm.lengthSq() < 0.001) norm.set(0, 1, 0);
+
+      for (let i = 0; i < posAttr.count; i++) {
+        const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
+        const dx = vx - localPoint.x, dy = vy - localPoint.y, dz = vz - localPoint.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > radius) continue;
+        const t = 1 - dist / radius;
+        const falloff = t * t * (3 - 2 * t);
+        const distToPlane = (vx - avgX) * norm.x + (vy - avgY) * norm.y + (vz - avgZ) * norm.z;
+        const k = falloff * strength * 0.2;
+        posAttr.setXYZ(i, vx - norm.x * distToPlane * k, vy - norm.y * distToPlane * k, vz - norm.z * distToPlane * k);
+      }
+    }
   } else {
     for (let i = 0; i < posAttr.count; i++) {
       const vx = posAttr.getX(i), vy = posAttr.getY(i), vz = posAttr.getZ(i);
@@ -970,13 +1318,12 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (dist > radius) continue;
       const t = 1 - dist / radius;
-      const falloff = t * t * (3 - 2 * t); // smoothstep -- borde de pincel mas natural
+      const falloff = t * t * (3 - 2 * t);
 
       if (brush === 'pinch') {
         const k = falloff * strength * 0.08;
         posAttr.setXYZ(i, vx + (localPoint.x - vx) * k, vy + (localPoint.y - vy) * k, vz + (localPoint.z - vz) * k);
       } else {
-        // empujar (afuera) / hundir (adentro): a lo largo de la normal del vertice
         const nx = normAttr.getX(i), ny = normAttr.getY(i), nz = normAttr.getZ(i);
         const dir = brush === 'pull' ? -1 : 1;
         const k = falloff * strength * 0.6 * dir;
@@ -989,6 +1336,15 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   entry.sculpted = true;
+}
+
+function applySculptStroke(entry, localPoint, brush, size, strength) {
+  applySculptStrokeSingle(entry, localPoint, brush, size, strength);
+  if (symmetryXInput && symmetryXInput.checked) {
+    const symPoint = localPoint.clone();
+    symPoint.x = -symPoint.x;
+    applySculptStrokeSingle(entry, symPoint, brush, size, strength);
+  }
 }
 
 // Detectar el inicio de un trazo de escultura ANTES de que OrbitControls/
