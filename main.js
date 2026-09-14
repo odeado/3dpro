@@ -43,6 +43,45 @@ const brushRow = document.getElementById('brushRow');
 const brushSizeInput = document.getElementById('brushSize');
 const brushStrengthInput = document.getElementById('brushStrength');
 
+// Tab switcher for right inspector panel
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    const tabId = btn.getAttribute('data-tab');
+    if (tabId) {
+      const target = document.getElementById(tabId);
+      if (target) target.classList.add('active');
+    }
+  });
+});
+
+// Side panel toggle
+if (toggleSidePanelBtn && rightPanel) {
+  toggleSidePanelBtn.addEventListener('click', () => {
+    const collapsed = rightPanel.classList.toggle('collapsed');
+    document.body.classList.toggle('side-collapsed', collapsed);
+    toggleSidePanelBtn.textContent = collapsed ? '◀' : '▶';
+  });
+}
+
+// Dropdown click handler (for touch/click)
+document.querySelectorAll('.dropbtn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const dropdown = btn.closest('.dropdown');
+    document.querySelectorAll('.dropdown').forEach(d => {
+      if (d !== dropdown) d.classList.remove('active');
+    });
+    if (dropdown) dropdown.classList.toggle('active');
+  });
+});
+
+window.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('active'));
+});
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x2b2f33);
 
