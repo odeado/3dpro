@@ -733,11 +733,26 @@ transform.addEventListener('objectChange', () => {
   updateTransformInputs();
 });
 
+// El gizmo clasico de TransformControls (los brazos de colores) y los
+// tiradores directos en mm (las bolitas en el centro de cada cara) hacen
+// lo mismo en modo Escalar -- tenerlos prendidos los dos a la vez hacia
+// facil agarrar el equivocado sin darse cuenta. Esta funcion decide cual
+// gizmo clasico mostrar (o ninguno) segun el modo actual; se usa en vez de
+// repetir "transform.attach(...)" suelto en cada lugar que puede cambiar
+// la seleccion o el modo.
+function syncTransformGizmo(entry) {
+  if (entry && toolMode !== 'sculpt' && toolMode !== 'hair' && toolMode !== 'scale') {
+    transform.attach(entry.mesh);
+  } else {
+    transform.detach();
+  }
+}
+
 function selectObject(id) {
   selectedId = id;
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
-    if (toolMode === 'sculpt' || toolMode === 'hair') transform.detach(); else transform.attach(entry.mesh);
+    syncTransformGizmo(entry);
     propsPanel.style.display = 'flex';
     if (noSelectionMsg) noSelectionMsg.style.display = 'none';
 
@@ -951,7 +966,7 @@ function setPivot(id, alignX, alignY, alignZ) {
     }
   }
 
-  transform.attach(entry.mesh);
+  syncTransformGizmo(entry);
   updateTransformInputs();
   pushHistory();
 }
@@ -1382,7 +1397,7 @@ function stopHandleDrag() {
   clearDimensionHUD();
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
-    if (entry && toolMode !== 'sculpt' && toolMode !== 'hair') transform.attach(entry.mesh);
+    syncTransformGizmo(entry);
     updateHandles(selectedId);
   }
   pushHistory();
@@ -2810,6 +2825,13 @@ function setMode(mode) {
     transform.detach();
     brushRow.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
+  } else if (mode === 'scale') {
+    // Los tiradores directos (con mm e iman) son el unico control de
+    // escalar ahora -- se apaga el gizmo clasico para que no queden los
+    // dos superpuestos en el mismo lugar.
+    transform.detach();
+    brushRow.style.display = 'none';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
   } else {
     brushRow.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
@@ -3369,7 +3391,7 @@ if (lockToggleBtn) {
       transform.detach();
       handleGroup.visible = false;
     } else {
-      if (toolMode !== 'sculpt' && toolMode !== 'hair') transform.attach(entry.mesh);
+      syncTransformGizmo(entry);
       updateHandles(selectedId);
     }
     updateLockBtn(selectedId);
