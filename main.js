@@ -690,8 +690,6 @@ function updateTransformInputs() {
   inp.addEventListener('change', () => pushHistory());
 });
 
-const resizeAnchorSelect = document.getElementById('resizeAnchorSelect');
-
 [sizeX, sizeY, sizeZ].forEach((inp, idx) => {
   if (!inp) return;
   const axes = ['x', 'y', 'z'];
@@ -709,23 +707,20 @@ const resizeAnchorSelect = document.getElementById('resizeAnchorSelect');
         Math.max(0.1, bb.max.z - bb.min.z)
       ];
       
-      const anchor = resizeAnchorSelect ? resizeAnchorSelect.value : 'min';
       const oldScale = entry.mesh.scale[axes[idx]];
       const oldSize = baseSizes[idx] * Math.abs(oldScale);
       const newScale = val / baseSizes[idx];
       const delta = (val - oldSize);
 
-      if (anchor === 'min') {
-        entry.mesh.position[axes[idx]] += delta / 2;
-      } else if (anchor === 'max') {
-        entry.mesh.position[axes[idx]] -= delta / 2;
-      }
+      // Crece manteniendo fija la base
+      entry.mesh.position[axes[idx]] += delta / 2;
       entry.mesh.scale[axes[idx]] = newScale;
 
       if (snapEnabled) {
         applyLiveFurnitureSnap(selectedId);
       }
       updateTransformInputs();
+      updateHandles(selectedId);
     }
   });
   inp.addEventListener('change', () => pushHistory());
@@ -1133,12 +1128,12 @@ handleGroup.renderOrder = 997;
 scene.add(handleGroup);
 
 const handleDefinitions = [
-  { id: 'handle_right',  axis: 'x', dir: 1,  name: 'Der',   color: 0x38bdf8 },
-  { id: 'handle_left',   axis: 'x', dir: -1, name: 'Izq',   color: 0x38bdf8 },
-  { id: 'handle_top',    axis: 'y', dir: 1,  name: 'Arriba',color: 0x22c55e },
-  { id: 'handle_bottom', axis: 'y', dir: -1, name: 'Abajo', color: 0x22c55e },
-  { id: 'handle_front',  axis: 'z', dir: 1,  name: 'Frente',color: 0x38bdf8 },
-  { id: 'handle_back',   axis: 'z', dir: -1, name: 'Atrás', color: 0x38bdf8 }
+  { id: 'handle_right',  axis: 'x', dir: 1,  name: 'Der',   color: 0xeb5757 },
+  { id: 'handle_left',   axis: 'x', dir: -1, name: 'Izq',   color: 0xeb5757 },
+  { id: 'handle_top',    axis: 'y', dir: 1,  name: 'Arriba',color: 0x27ae60 },
+  { id: 'handle_bottom', axis: 'y', dir: -1, name: 'Abajo', color: 0x27ae60 },
+  { id: 'handle_front',  axis: 'z', dir: 1,  name: 'Frente',color: 0x2d9cdb },
+  { id: 'handle_back',   axis: 'z', dir: -1, name: 'Atrás', color: 0x2d9cdb }
 ];
 
 const handleMeshes = [];
@@ -1174,19 +1169,28 @@ function updateHandles(id) {
     return;
   }
 
-  const box = new THREE.Box3().setFromObject(entry.mesh);
-  const center = new THREE.Vector3();
-  const size = new THREE.Vector3();
-  box.getCenter(center);
-  box.getSize(size);
+  const geo = entry.mesh.geometry;
+  if (!geo.boundingBox) geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+
+  const lCenter = new THREE.Vector3(
+    (bb.min.x + bb.max.x) / 2,
+    (bb.min.y + bb.max.y) / 2,
+    (bb.min.z + bb.max.z) / 2
+  );
+
+  entry.mesh.updateMatrixWorld(true);
 
   handleMeshes.forEach(mesh => {
     const def = mesh.userData.def;
-    const pos = center.clone();
-    if (def.axis === 'x') pos.x += (def.dir * size.x / 2);
-    else if (def.axis === 'y') pos.y += (def.dir * size.y / 2);
-    else if (def.axis === 'z') pos.z += (def.dir * size.z / 2);
-    mesh.position.copy(pos);
+    const lPos = lCenter.clone();
+    if (def.axis === 'x') lPos.x = (def.dir === 1 ? bb.max.x : bb.min.x);
+    else if (def.axis === 'y') lPos.y = (def.dir === 1 ? bb.max.y : bb.min.y);
+    else if (def.axis === 'z') lPos.z = (def.dir === 1 ? bb.max.z : bb.min.z);
+
+    const wPos = lPos.clone().applyMatrix4(entry.mesh.matrixWorld);
+    mesh.position.copy(wPos);
+    mesh.quaternion.copy(entry.mesh.quaternion);
   });
 
   handleGroup.visible = true;
@@ -1195,13 +1199,15 @@ function updateHandles(id) {
 // Estado de Arrastre de Tiradores
 let isDraggingHandle = false;
 let activeDragHandle = null;
+let dragStartPointer = { clientX: 0, clientY: 0 };
 let dragStartPos = new THREE.Vector3();
 let dragStartScale = new THREE.Vector3();
-let dragStartBox = new THREE.Box3();
+let dragStartSize = 100;
 let dragBaseDimensions = { w: 100, h: 100, d: 100 };
-let dragPlane = new THREE.Plane();
+let dragScreenDir = new THREE.Vector2();
+let dragMmPerPixel = 1;
 
-function startHandleDrag(handleMesh) {
+function startHandleDrag(handleMesh, clientX, clientY) {
   if (selectedId == null) return;
   const entry = sceneObjects.get(selectedId);
   if (!entry || !entry.mesh.geometry) return;
@@ -1209,11 +1215,16 @@ function startHandleDrag(handleMesh) {
   isDraggingHandle = true;
   activeDragHandle = handleMesh.userData.def;
   orbit.enabled = false;
-  transform.detach(); // Oculta el gizmo mientras se estira con el tirador
+  transform.detach();
 
+  // Ocultar los otros tiradores durante el arrastre para no saturar la vista
+  handleMeshes.forEach(m => {
+    m.visible = (m === handleMesh);
+  });
+
+  dragStartPointer = { clientX, clientY };
   dragStartPos.copy(entry.mesh.position);
   dragStartScale.copy(entry.mesh.scale);
-  dragStartBox.setFromObject(entry.mesh);
 
   const bb = entry.mesh.geometry.boundingBox || new THREE.Box3().setFromBufferAttribute(entry.mesh.geometry.attributes.position);
   dragBaseDimensions = {
@@ -1222,10 +1233,29 @@ function startHandleDrag(handleMesh) {
     d: Math.max(0.1, bb.max.z - bb.min.z)
   };
 
-  const handleWorldPos = handleMesh.position.clone();
-  const camDir = new THREE.Vector3();
-  activeCamera.getWorldDirection(camDir);
-  dragPlane.setFromNormalAndCoplanarPoint(camDir.negate(), handleWorldPos);
+  const axis = activeDragHandle.axis;
+  const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
+  dragStartSize = baseSize * Math.abs(dragStartScale[axis]);
+
+  // Vector unitario 3D del tirador en coordenadas del mundo
+  const handleDirWorld = new THREE.Vector3();
+  if (axis === 'x') handleDirWorld.set(activeDragHandle.dir, 0, 0);
+  else if (axis === 'y') handleDirWorld.set(0, activeDragHandle.dir, 0);
+  else handleDirWorld.set(0, 0, activeDragHandle.dir);
+  handleDirWorld.applyQuaternion(entry.mesh.quaternion).normalize();
+
+  // Proyectar este vector a la pantalla para mapear el movimiento del cursor 1:1 en mm
+  const p0 = project3DToScreen(handleMesh.position);
+  const p1 = project3DToScreen(handleMesh.position.clone().add(handleDirWorld.clone().multiplyScalar(50)));
+  const screenVec = new THREE.Vector2(p1.x - p0.x, p1.y - p0.y);
+  const screenLen = screenVec.length();
+  if (screenLen > 0.001) {
+    dragScreenDir.copy(screenVec).normalize();
+    dragMmPerPixel = 50 / screenLen;
+  } else {
+    dragScreenDir.set(1, 0);
+    dragMmPerPixel = 1;
+  }
 }
 
 function onHandleDrag(clientX, clientY) {
@@ -1233,37 +1263,29 @@ function onHandleDrag(clientX, clientY) {
   const entry = sceneObjects.get(selectedId);
   if (!entry) return;
 
-  const { rect, cam } = getPointerRayContext(clientX, clientY);
-  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, cam);
-
-  const planeHit = new THREE.Vector3();
-  if (!raycaster.ray.intersectPlane(dragPlane, planeHit)) return;
-
   const def = activeDragHandle;
   const axis = def.axis;
   const dir = def.dir;
 
-  const initialHandlePos = dragStartBox.getCenter(new THREE.Vector3());
-  if (axis === 'x') initialHandlePos.x += (dir * (dragStartBox.max.x - dragStartBox.min.x) / 2);
-  else if (axis === 'y') initialHandlePos.y += (dir * (dragStartBox.max.y - dragStartBox.min.y) / 2);
-  else if (axis === 'z') initialHandlePos.z += (dir * (dragStartBox.max.z - dragStartBox.min.z) / 2);
+  // Desplazamiento del mouse proyectado sobre el eje del tirador (ultra suave y preciso)
+  const mouseDelta = new THREE.Vector2(clientX - dragStartPointer.clientX, clientY - dragStartPointer.clientY);
+  const deltaPixels = mouseDelta.dot(dragScreenDir);
+  let deltaMM = deltaPixels * dragMmPerPixel;
 
-  const delta = (planeHit[axis] - initialHandlePos[axis]) * dir;
-
-  const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
-  const startSize = baseSize * Math.abs(dragStartScale[axis]);
-  let newSize = Math.max(1, startSize + delta);
+  let newSize = Math.max(1, dragStartSize + deltaMM);
 
   if (snapEnabled) {
     newSize = Math.max(snapGridStep, Math.round(newSize / snapGridStep) * snapGridStep);
   }
 
-  let currentEdgePos = (dir === 1) ? (dragStartBox.min[axis] + newSize) : (dragStartBox.max[axis] - newSize);
+  const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
+  const sizeDiff = newSize - dragStartSize;
+
+  // Calcular la posición del borde actual en el mundo
+  let currentEdgePos = dragStartPos[axis] + (dir * (dragStartSize / 2 + sizeDiff));
 
   // Escanear bordes vecinos para saber dónde está el TOPE y cuánto le falta
-  const snapDist = snapGridStep || 10;
+  const snapDist = snapEnabled ? (snapGridStep || 10) : 6;
   let nearestTargetEdge = null;
   let minRemDist = Infinity;
   let bestNeighborBox = null;
@@ -1289,20 +1311,22 @@ function onHandleDrag(clientX, clientY) {
   let isTope = false;
   if (nearestTargetEdge !== null && minRemDist <= snapDist) {
     isTope = true;
-    if (dir === 1) newSize = Math.max(1, nearestTargetEdge - dragStartBox.min[axis]);
-    else newSize = Math.max(1, dragStartBox.max[axis] - nearestTargetEdge);
-    currentEdgePos = nearestTargetEdge;
+    const snappedEdge = nearestTargetEdge;
+    if (dir === 1) {
+      newSize = Math.max(1, snappedEdge - (dragStartPos[axis] - dragStartSize / 2));
+    } else {
+      newSize = Math.max(1, (dragStartPos[axis] + dragStartSize / 2) - snappedEdge);
+    }
+    currentEdgePos = snappedEdge;
     minRemDist = 0;
   }
 
-  // Redimensionar anclando el lado opuesto
+  // Aplicar escala y reposicionar para que el lado opuesto permanezca totalmente fijo
   entry.mesh.scale[axis] = newSize / baseSize;
-  if (dir === 1) {
-    entry.mesh.position[axis] = dragStartBox.min[axis] + newSize / 2;
-  } else {
-    entry.mesh.position[axis] = dragStartBox.max[axis] - newSize / 2;
-  }
+  const appliedSizeDiff = newSize - dragStartSize;
+  entry.mesh.position[axis] = dragStartPos[axis] + (dir * appliedSizeDiff / 2);
 
+  // Calcular posición actual del tirador para la etiqueta de cota
   const currentBox = new THREE.Box3().setFromObject(entry.mesh);
   const currentCenter = currentBox.getCenter(new THREE.Vector3());
   const handlePos = currentCenter.clone();
@@ -1326,6 +1350,8 @@ function onHandleDrag(clientX, clientY) {
     showHudBadge('rem', remText, midPos, 'rem', isTope);
   } else {
     hideDashedLine();
+    const b = document.getElementById('hud_badge_rem');
+    if (b) b.style.display = 'none';
   }
 
   updateHandles(selectedId);
@@ -1337,6 +1363,7 @@ function stopHandleDrag() {
   isDraggingHandle = false;
   activeDragHandle = null;
   orbit.enabled = true;
+  handleMeshes.forEach(m => { m.visible = true; });
   clearDimensionHUD();
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
