@@ -42,6 +42,9 @@ const toolbar = document.getElementById('toolbar');
 const brushRow = document.getElementById('brushRow');
 const brushSizeInput = document.getElementById('brushSize');
 const brushStrengthInput = document.getElementById('brushStrength');
+const hairRow = document.getElementById('hairRow');
+const hairRootRadiusInput = document.getElementById('hairRootRadius');
+const hairTipRadiusInput = document.getElementById('hairTipRadius');
 
 // Tab switcher for right inspector panel
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -162,8 +165,13 @@ const KIND_LABEL = {
   hair: '💇 Pelo'
 };
 
-const HAIR_ROOT_RADIUS = 4;
-const HAIR_TIP_RADIUS = 0.6;
+// "let" (no "const"): los deslizadores de grosor en la barra de contexto
+// del modo Pelo cambian estos valores en vivo (ver hairRootRadiusInput /
+// hairTipRadiusInput mas abajo), asi el usuario controla que tan grueso
+// sale cada trazo nuevo -- antes estaban fijos y por eso el pelo se veia
+// siempre igual de grueso ("como ramas").
+let HAIR_ROOT_RADIUS = 4;
+let HAIR_TIP_RADIUS = 0.6;
 const HAIR_DEFAULT_COLOR = 0x3b2415;
 const HAIR_MIN_SPACING = 4; // unidades: no agregar un punto nuevo del trazo si esta muy cerca del anterior
 
@@ -897,6 +905,7 @@ alignOriginBtn.addEventListener('click', () => {
   if (!entry) return;
   entry.mesh.position.x = 0;
   entry.mesh.position.z = 0;
+  updateHandles(selectedId); // los tiradores de Escalar quedan pegados a las caras -- si no se refrescan, se quedan flotando en el lugar viejo
   pushHistory();
 });
 
@@ -907,6 +916,7 @@ alignGroundBtn.addEventListener('click', () => {
   const box = new THREE.Box3().setFromObject(entry.mesh);
   const minY = box.min.y;
   entry.mesh.position.y -= minY;
+  updateHandles(selectedId);
   pushHistory();
 });
 
@@ -967,6 +977,7 @@ function setPivot(id, alignX, alignY, alignZ) {
   }
 
   syncTransformGizmo(entry);
+  updateHandles(selectedId); // cambiar el pivote tambien mueve la figura -- refrescar los tiradores igual que en Centrar/Al suelo
   updateTransformInputs();
   pushHistory();
 }
@@ -1682,6 +1693,8 @@ function updateClonerLive(clonerEntry) {
     });
   }
   clonerEntry.clonerChildIds = [];
+  clonerEntry._lastSrcPos = null;
+  clonerEntry._lastSrcRot = null;
 
   const mode = clonerEntry.clonerMode || 'linear';
   const count = clonerEntry.clonerCount || 3;
@@ -1718,9 +1731,100 @@ function updateClonerLive(clonerEntry) {
         clonerEntry.clonerChildIds.push(newId);
       }
     }
+  } else if (mode === 'grid') {
+    const gx = clonerEntry.gridX || 3;
+    const gy = clonerEntry.gridY || 1;
+    const gz = clonerEntry.gridZ || 3;
+    const sx = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
+    const sy = clonerEntry.sepY != null ? clonerEntry.sepY : 80;
+    const sz = clonerEntry.sepZ != null ? clonerEntry.sepZ : 80;
+    const startX = srcPos.x - (gx - 1) * sx / 2;
+    const startY = srcPos.y;
+    const startZ = srcPos.z - (gz - 1) * sz / 2;
+    let first = true;
+    for (let iy = 0; iy < gy; iy++) {
+      for (let iz = 0; iz < gz; iz++) {
+        for (let ix = 0; ix < gx; ix++) {
+          if (first) { first = false; continue; } // el primer casillero es el objeto original
+          const pos = new THREE.Vector3(startX + ix * sx, startY + iy * sy, startZ + iz * sz);
+          const newId = cloneEntryAt(src, pos);
+          const e = sceneObjects.get(newId);
+          if (e) {
+            clonerEntry.mesh.attach(e.mesh);
+            e.parentId = clonerEntry.id;
+            clonerEntry.clonerChildIds.push(newId);
+          }
+        }
+      }
+    }
   }
 
   renderLayerList();
+}
+
+// Cada cuadro (60x por segundo): mueve/rota/escala/recolorea los hijos ya
+// creados de un clonador para que sigan al objeto original en vivo, sin
+// tocar clonerChildIds ni recrear nada -- eso es trabajo de updateClonerLive()
+// y solo debe pasar cuando el usuario cambia un parametro propio del
+// clonador (cantidad, separacion, radio, modo, rotar copias).
+// Como el original y todas las copias son hermanos dentro del mismo Null
+// (ver groupIds), basta con comparar la posicion/rotacion LOCAL del
+// original contra la que tenia el cuadro anterior y aplicar esa misma
+// diferencia a cada copia -- así se respeta la formula de cada modo
+// (lineal/circular/cuadricula) sin tener que repetirla aqui.
+function syncClonerChildrenLive(clonerEntry) {
+  const src = sceneObjects.get(clonerEntry.clonerSourceId);
+  if (!src || !clonerEntry.clonerChildIds || !clonerEntry.clonerChildIds.length) {
+    clonerEntry._lastSrcPos = null;
+    clonerEntry._lastSrcRot = null;
+    return;
+  }
+
+  const curPos = src.mesh.position;
+  const curRot = src.mesh.rotation;
+
+  if (!clonerEntry._lastSrcPos) {
+    // Primera vez que vemos este clonador (o recien reconstruido): solo
+    // guardamos la base, sin mover nada, para no dar un salto visual.
+    clonerEntry._lastSrcPos = curPos.clone();
+    clonerEntry._lastSrcRot = { x: curRot.x, y: curRot.y, z: curRot.z };
+  } else {
+    const dx = curPos.x - clonerEntry._lastSrcPos.x;
+    const dy = curPos.y - clonerEntry._lastSrcPos.y;
+    const dz = curPos.z - clonerEntry._lastSrcPos.z;
+    const drx = curRot.x - clonerEntry._lastSrcRot.x;
+    const dry = curRot.y - clonerEntry._lastSrcRot.y;
+    const drz = curRot.z - clonerEntry._lastSrcRot.z;
+    if (dx || dy || dz || drx || dry || drz) {
+      clonerEntry.clonerChildIds.forEach(cid => {
+        const c = sceneObjects.get(cid);
+        if (!c) return;
+        c.mesh.position.x += dx; c.mesh.position.y += dy; c.mesh.position.z += dz;
+        c.mesh.rotation.x += drx; c.mesh.rotation.y += dry; c.mesh.rotation.z += drz;
+      });
+      clonerEntry._lastSrcPos.set(curPos.x, curPos.y, curPos.z);
+      clonerEntry._lastSrcRot.x = curRot.x; clonerEntry._lastSrcRot.y = curRot.y; clonerEntry._lastSrcRot.z = curRot.z;
+    }
+  }
+
+  // La escala y el material nunca tienen un offset distinto por copia
+  // (cloneEntryAt siempre copia el material y la escala tal cual del
+  // original al crear), asi que un copiado directo cada cuadro es exacto
+  // y mas simple que llevar otra diferencia acumulada.
+  const srcMat = src.mesh.material;
+  clonerEntry.clonerChildIds.forEach(cid => {
+    const c = sceneObjects.get(cid);
+    if (!c) return;
+    c.mesh.scale.copy(src.mesh.scale);
+    if (srcMat && c.mesh.material) {
+      c.mesh.material.color.copy(srcMat.color);
+      c.mesh.material.roughness = srcMat.roughness;
+      c.mesh.material.metalness = srcMat.metalness;
+      c.mesh.material.opacity = srcMat.opacity;
+      c.mesh.material.transparent = srcMat.opacity < 1.0;
+      c.mesh.material.wireframe = srcMat.wireframe;
+    }
+  });
 }
 
 function getActiveCloner() {
@@ -2795,6 +2899,19 @@ brushRow.querySelectorAll('[data-brush]').forEach(b => {
   });
 });
 
+if (hairRootRadiusInput) {
+  hairRootRadiusInput.addEventListener('input', () => {
+    HAIR_ROOT_RADIUS = parseFloat(hairRootRadiusInput.value);
+    updateHairPreview(); // si hay un trazo en curso, se ve el grosor nuevo al toque
+  });
+}
+if (hairTipRadiusInput) {
+  hairTipRadiusInput.addEventListener('input', () => {
+    HAIR_TIP_RADIUS = parseFloat(hairTipRadiusInput.value);
+    updateHairPreview();
+  });
+}
+
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (transform.dragging) return;
   if (toolMode === 'hair') return; // en modo Pelo, tocar dibuja -- no selecciona
@@ -2808,6 +2925,17 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
 // canvas donde estan enganchados esos controles.
 wrap.addEventListener('pointerdown', (e) => {
   if (!fourViewMode) return;
+  // Si ya hay un dedo abajo (por ejemplo, arrastrando/orbitando en otro
+  // cuadrante) y llega un SEGUNDO toque simultaneo (un pellizco de zoom, o
+  // un dedo de mas apoyado sin querer junto al lapiz), ese segundo toque
+  // NO es "isPrimary" -- no debe cambiar de camara activa a mitad de un
+  // gesto que todavia esta en curso. Cambiarla ahi (reasignando
+  // orbit.object) deja pendiente el giro/paneo que se estaba acumulando
+  // para la camara VIEJA y se lo aplica de golpe a la camara NUEVA cuando
+  // useCamera() llama a orbit.update() -- eso desalineaba para siempre una
+  // de las camaras fijas (Frente/Izquierda/Arriba), que no se supone que
+  // roten nunca.
+  if (!e.isPrimary) return;
   const q = quadrantAt(e.clientX, e.clientY);
   if (q !== activeQuadrant) setActiveQuadrant(q);
 }, { capture: true });
@@ -2836,20 +2964,24 @@ function setMode(mode) {
   if (mode === 'sculpt') {
     transform.detach();
     brushRow.style.display = 'flex';
+    if (hairRow) hairRow.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'none';
   } else if (mode === 'hair') {
     transform.detach();
     brushRow.style.display = 'none';
-    if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
+    if (hairRow) hairRow.style.display = 'flex';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'none';
   } else if (mode === 'scale') {
     // Los tiradores directos (con mm e iman) son el unico control de
     // escalar ahora -- se apaga el gizmo clasico para que no queden los
     // dos superpuestos en el mismo lugar.
     transform.detach();
     brushRow.style.display = 'none';
+    if (hairRow) hairRow.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
   } else {
     brushRow.style.display = 'none';
+    if (hairRow) hairRow.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
     transform.setMode(mode);
     if (selectedId != null) {
@@ -3151,7 +3283,20 @@ function animate() {
       entry.mesh.material.opacity = srcEntry.mesh.material.opacity;
       entry.mesh.material.transparent = srcEntry.mesh.material.opacity < 1.0;
       entry.mesh.material.side = THREE.DoubleSide;
+      entry.mesh.material.color.copy(srcEntry.mesh.material.color);
+      entry.mesh.material.roughness = srcEntry.mesh.material.roughness;
+      entry.mesh.material.metalness = srcEntry.mesh.material.metalness;
+      entry.mesh.material.wireframe = srcEntry.mesh.material.wireframe;
     }
+  });
+
+  // Live clonador: los hijos existentes del clonador (matriz/lineal/circular)
+  // siguen al objeto original en posicion/rotacion/escala/material SIN
+  // destruir y recrear nada -- eso queda solo para cuando se toca un
+  // parametro propio del clonador (cantidad, separacion, radio, modo).
+  sceneObjects.forEach(entry => {
+    if (entry.clonerMode == null) return;
+    syncClonerChildrenLive(entry);
   });
 
   if (fourViewMode) {
@@ -3372,7 +3517,10 @@ if (arrayApplyBtn) {
         clonerChildIds: createdIds.filter(id => id !== selectedId),
         sepX: sx,
         sepY: sy,
-        sepZ: sz
+        sepZ: sz,
+        gridX: gx,
+        gridY: gy,
+        gridZ: gz
       });
       renderLayerList();
       selectObject(nullId);
