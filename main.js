@@ -57,15 +57,6 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   });
 });
 
-// Side panel toggle
-if (toggleSidePanelBtn && rightPanel) {
-  toggleSidePanelBtn.addEventListener('click', () => {
-    const collapsed = rightPanel.classList.toggle('collapsed');
-    document.body.classList.toggle('side-collapsed', collapsed);
-    toggleSidePanelBtn.textContent = collapsed ? '◀' : '▶';
-  });
-}
-
 // Dropdown click handler (for touch/click)
 document.querySelectorAll('.dropbtn').forEach(btn => {
   btn.addEventListener('click', (e) => {
@@ -400,6 +391,59 @@ function cloneObject(id) {
   pushHistory();
 }
 
+function cloneObjectSymmetry(id) {
+  const src = sceneObjects.get(id);
+  if (!src) return;
+  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
+  const extraOpts = {
+    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
+    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
+    opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
+    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
+  };
+  if (src.kind === 'hair') {
+    extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  }
+  const built = buildObject(src.kind, colorHex, extraOpts);
+  built.node.position.copy(src.mesh.position);
+  built.node.position.x = -src.mesh.position.x;
+  built.node.rotation.copy(src.mesh.rotation);
+  built.node.rotation.y = -src.mesh.rotation.y;
+  built.node.scale.copy(src.mesh.scale);
+
+  let copiedSculpt = false;
+  if (src.kind !== 'hair') {
+    copiedSculpt = copySculptIfAny(src, built.node);
+    if (copiedSculpt && built.node.geometry && built.node.geometry.attributes.position) {
+      const posAttr = built.node.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) {
+        posAttr.setX(i, -posAttr.getX(i));
+      }
+      posAttr.needsUpdate = true;
+      built.node.geometry.computeVertexNormals();
+      built.node.geometry.computeBoundingSphere();
+    }
+  }
+
+  scene.add(built.node);
+  const newId = objIdCounter++;
+  built.pickMesh.userData.ownerId = newId;
+  sceneObjects.set(newId, {
+    id: newId,
+    kind: src.kind,
+    mesh: built.node,
+    pickMesh: built.pickMesh,
+    visible: true,
+    parentId: null,
+    sculpted: copiedSculpt,
+    name: (src.name || KIND_LABEL[src.kind] || src.kind) + ' (Espejo X)',
+    collapsed: false
+  });
+  renderLayerList();
+  selectObject(newId);
+  pushHistory();
+}
+
 // --- Agrupar / desagrupar (el Nulo funciona como "mango": lo que se mete
 // adentro se mueve/rota/escala junto con el cuando se transforma el Nulo) ---
 function isDescendantOf(candidateId, ancestorId) {
@@ -629,15 +673,33 @@ alignGroundBtn.addEventListener('click', () => {
 
 focusCamBtn.addEventListener('click', focusCameraOnSelection);
 
+const cloneSymBtn = document.getElementById('cloneSymBtn');
+if (cloneSymBtn) {
+  cloneSymBtn.addEventListener('click', () => {
+    if (selectedId != null) cloneObjectSymmetry(selectedId);
+  });
+}
+
+const deleteObjBtn = document.getElementById('deleteObjBtn');
+if (deleteObjBtn) {
+  deleteObjBtn.addEventListener('click', () => {
+    if (selectedId != null) removeObject(selectedId);
+  });
+}
+
 shadowToggle.addEventListener('change', () => {
   renderer.shadowMap.enabled = shadowToggle.checked;
 });
 
 toggleSidePanelBtn.addEventListener('click', () => {
-  rightPanel.classList.toggle('collapsed');
-  document.body.classList.toggle('side-collapsed', rightPanel.classList.contains('collapsed'));
-  toggleSidePanelBtn.textContent = rightPanel.classList.contains('collapsed') ? '◀' : '▶';
-  handleResize();
+  const collapsed = rightPanel.classList.toggle('collapsed');
+  document.body.classList.toggle('side-collapsed', collapsed);
+  toggleSidePanelBtn.textContent = collapsed ? '◀' : '▶';
+  // Redimensionar canvas al cambiar panel
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h);
+  perspCam.aspect = w / h;
+  perspCam.updateProjectionMatrix();
 });
 
 // --- Lógica de Menús Desplegables Header ---
@@ -1453,10 +1515,10 @@ window.addEventListener('pointerup', () => {
   pushHistory(); // guarda el estado esculpido para poder deshacerlo
 });
 
-brushRow.querySelectorAll('.tbtn[data-brush]').forEach(b => {
+brushRow.querySelectorAll('[data-brush]').forEach(b => {
   b.addEventListener('click', () => {
     brushType = b.dataset.brush;
-    brushRow.querySelectorAll('.tbtn[data-brush]').forEach(bb => bb.classList.toggle('active', bb === b));
+    brushRow.querySelectorAll('[data-brush]').forEach(bb => bb.classList.toggle('active', bb === b));
   });
 });
 
