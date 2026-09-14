@@ -1163,8 +1163,13 @@ function updateHandles(id) {
     handleGroup.visible = false;
     return;
   }
+  // Tiradores SOLO en modo Escalar
+  if (toolMode !== 'scale') {
+    handleGroup.visible = false;
+    return;
+  }
   const entry = sceneObjects.get(id);
-  if (!entry || entry.kind === 'null' || !entry.mesh.geometry || toolMode === 'sculpt' || toolMode === 'hair') {
+  if (!entry || entry.kind === 'null' || !entry.mesh.geometry) {
     handleGroup.visible = false;
     return;
   }
@@ -1265,89 +1270,99 @@ function onHandleDrag(clientX, clientY) {
 
   const def = activeDragHandle;
   const axis = def.axis;
-  const dir = def.dir;
+  const dir  = def.dir;
 
-  // Desplazamiento del mouse proyectado sobre el eje del tirador (ultra suave y preciso)
-  const mouseDelta = new THREE.Vector2(clientX - dragStartPointer.clientX, clientY - dragStartPointer.clientY);
+  // Delta del mouse proyectado sobre la dirección del eje en pantalla
+  const mouseDelta = new THREE.Vector2(
+    clientX - dragStartPointer.clientX,
+    clientY - dragStartPointer.clientY
+  );
   const deltaPixels = mouseDelta.dot(dragScreenDir);
   let deltaMM = deltaPixels * dragMmPerPixel;
 
+  // Nuevo tamaño crudo
   let newSize = Math.max(1, dragStartSize + deltaMM);
-
   if (snapEnabled) {
     newSize = Math.max(snapGridStep, Math.round(newSize / snapGridStep) * snapGridStep);
   }
 
-  const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
-  const sizeDiff = newSize - dragStartSize;
+  const baseSize = axis === 'x' ? dragBaseDimensions.w
+                 : axis === 'y' ? dragBaseDimensions.h
+                 : dragBaseDimensions.d;
 
-  // Calcular la posición del borde actual en el mundo
-  let currentEdgePos = dragStartPos[axis] + (dir * (dragStartSize / 2 + sizeDiff));
+  // ── Lógica de anclaje en el PIVOT ────────────────────────────────────────
+  // El pivot (origin) del mesh es el punto fijo. En local-space, el pivot
+  // siempre está en (0,0,0) del mesh. La geometría puede estar desplazada.
+  // bb.min/max son los extremos en local-space.
+  const bb = entry.mesh.geometry.boundingBox;
+  const pivotToMin = bb.min[axis];   // distancia del pivot al borde mínimo (negativa si pivot a la derecha)
+  const pivotToMax = bb.max[axis];   // distancia del pivot al borde máximo
 
-  // Escanear bordes vecinos para saber dónde está el TOPE y cuánto le falta
+  // Escala nueva
+  const newScale = newSize / baseSize;
+  entry.mesh.scale[axis] = newScale;
+
+  // La posición NO cambia: el pivot se queda en su lugar.
+  // El objeto crece/decrece alrededor del pivot según la geometría.
+  entry.mesh.position[axis] = dragStartPos[axis];
+
+  // Borde activo en world-space (para HUD y snap)
+  entry.mesh.updateMatrixWorld(true);
+  const currentBox = new THREE.Box3().setFromObject(entry.mesh);
+  const currentEdgePos = dir === 1 ? currentBox.max[axis] : currentBox.min[axis];
+
+  // ── Snap a borde vecino ───────────────────────────────────────────────────
   const snapDist = snapEnabled ? (snapGridStep || 10) : 6;
   let nearestTargetEdge = null;
   let minRemDist = Infinity;
-  let bestNeighborBox = null;
 
   sceneObjects.forEach((other, otherId) => {
     if (otherId === selectedId || other.kind === 'null' || !other.visible) return;
     if (isDescendantOf(otherId, selectedId) || isDescendantOf(selectedId, otherId)) return;
-
     const boxB = new THREE.Box3().setFromObject(other.mesh);
-    const candidateEdges = [boxB.min[axis], boxB.max[axis]];
-    if (axis === 'y') candidateEdges.push(0);
-
-    candidateEdges.forEach(targetVal => {
+    const candidates = [boxB.min[axis], boxB.max[axis]];
+    if (axis === 'y') candidates.push(0);
+    candidates.forEach(targetVal => {
       const rem = Math.abs(targetVal - currentEdgePos);
-      if (rem < minRemDist) {
-        minRemDist = rem;
-        nearestTargetEdge = targetVal;
-        bestNeighborBox = boxB;
-      }
+      if (rem < minRemDist) { minRemDist = rem; nearestTargetEdge = targetVal; }
     });
   });
 
   let isTope = false;
   if (nearestTargetEdge !== null && minRemDist <= snapDist) {
     isTope = true;
-    const snappedEdge = nearestTargetEdge;
-    if (dir === 1) {
-      newSize = Math.max(1, snappedEdge - (dragStartPos[axis] - dragStartSize / 2));
-    } else {
-      newSize = Math.max(1, (dragStartPos[axis] + dragStartSize / 2) - snappedEdge);
+    // Calcular qué escala hace que el borde llegue exactamente al target
+    // borde_world = pivot_world + sign * localEdgeDist * scale
+    const pivotWorld = dragStartPos[axis];
+    const localEdgeDist = dir === 1 ? pivotToMax : -pivotToMin; // siempre positivo
+    if (Math.abs(localEdgeDist) > 0.001) {
+      const requiredScale = (dir * (nearestTargetEdge - pivotWorld)) / localEdgeDist;
+      if (requiredScale > 0.001) {
+        newSize = requiredScale * baseSize;
+        entry.mesh.scale[axis] = requiredScale;
+        entry.mesh.updateMatrixWorld(true);
+      }
     }
-    currentEdgePos = snappedEdge;
     minRemDist = 0;
   }
 
-  // Aplicar escala y reposicionar para que el lado opuesto permanezca totalmente fijo
-  entry.mesh.scale[axis] = newSize / baseSize;
-  const appliedSizeDiff = newSize - dragStartSize;
-  entry.mesh.position[axis] = dragStartPos[axis] + (dir * appliedSizeDiff / 2);
+  // ── HUD badges ───────────────────────────────────────────────────────────
+  entry.mesh.updateMatrixWorld(true);
+  const finalBox = new THREE.Box3().setFromObject(entry.mesh);
+  const finalEdgePos = dir === 1 ? finalBox.max[axis] : finalBox.min[axis];
+  const hudCenter = finalBox.getCenter(new THREE.Vector3());
+  const handlePos = hudCenter.clone();
+  handlePos[axis] = finalEdgePos;
 
-  // Calcular posición actual del tirador para la etiqueta de cota
-  const currentBox = new THREE.Box3().setFromObject(entry.mesh);
-  const currentCenter = currentBox.getCenter(new THREE.Vector3());
-  const handlePos = currentCenter.clone();
-  handlePos[axis] = currentEdgePos;
+  showHudBadge('size', `${Math.round(newSize)} <span class="hud-icon">✎</span>`, handlePos, 'size');
 
-  // 1. Mostrar Medida Actual (ej: "462 ✎")
-  const sizeVal = Math.round(newSize);
-  showHudBadge('size', `${sizeVal} <span class="hud-icon">✎</span>`, handlePos, 'size');
-
-  // 2. Mostrar Cuánto le falta al Tope con línea de cotas punteada (ej: "106 mm" o "0 TOPE")
-  if (nearestTargetEdge !== null && bestNeighborBox) {
+  if (nearestTargetEdge !== null) {
     const p1 = handlePos.clone();
     const p2 = handlePos.clone();
     p2[axis] = nearestTargetEdge;
-
     setDashedLine(p1, p2);
-
     const midPos = p1.clone().add(p2).multiplyScalar(0.5);
-    const remVal = Math.round(minRemDist);
-    const remText = isTope ? `0 TOPE` : `${remVal} mm`;
-    showHudBadge('rem', remText, midPos, 'rem', isTope);
+    showHudBadge('rem', isTope ? `0 TOPE` : `${Math.round(minRemDist)} mm`, midPos, 'rem', isTope);
   } else {
     hideDashedLine();
     const b = document.getElementById('hud_badge_rem');
@@ -2804,6 +2819,8 @@ function setMode(mode) {
       if (entry) transform.attach(entry.mesh);
     }
   }
+  // Actualizar tiradores: solo se ven en modo scale
+  updateHandles(selectedId);
   syncCanvasTop();
 }
 modeButtons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
@@ -3326,4 +3343,238 @@ if (arrayApplyBtn) {
 
     arrayModal.classList.remove('show');
   });
+}
+
+// =====================================================================
+// FEATURE 1: BLOQUEAR / DESBLOQUEAR OBJETO
+// =====================================================================
+const lockToggleBtn = document.getElementById('lockToggleBtn');
+
+function updateLockBtn(id) {
+  if (!lockToggleBtn) return;
+  const entry = id != null ? sceneObjects.get(id) : null;
+  if (!entry) { lockToggleBtn.textContent = '🔓 Libre'; lockToggleBtn.style.color = ''; lockToggleBtn.style.borderColor = ''; return; }
+  lockToggleBtn.textContent  = entry.locked ? '🔒 Bloqueado' : '🔓 Libre';
+  lockToggleBtn.style.color  = entry.locked ? '#f87171' : '';
+  lockToggleBtn.style.borderColor = entry.locked ? '#ef4444' : '';
+}
+
+if (lockToggleBtn) {
+  lockToggleBtn.addEventListener('click', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry) return;
+    entry.locked = !entry.locked;
+    if (entry.locked) {
+      transform.detach();
+      handleGroup.visible = false;
+    } else {
+      if (toolMode !== 'sculpt' && toolMode !== 'hair') transform.attach(entry.mesh);
+      updateHandles(selectedId);
+    }
+    updateLockBtn(selectedId);
+    pushHistory();
+  });
+}
+
+transform.addEventListener('mouseDown', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (entry && entry.locked) { transform.detach(); }
+});
+
+// =====================================================================
+// FEATURE 2: W/H/D BADGE PERMANENTE AL SELECCIONAR
+// =====================================================================
+function updateWHDBadge() {
+  if (selectedId == null || isDraggingHandle) {
+    const b = document.getElementById('hud_badge_whd');
+    if (b) b.style.display = 'none';
+    return;
+  }
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind === 'null' || !entry.mesh.geometry) {
+    const b = document.getElementById('hud_badge_whd');
+    if (b) b.style.display = 'none';
+    return;
+  }
+  entry.mesh.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(entry.mesh);
+  const sz  = box.getSize(new THREE.Vector3());
+  const topPos = box.getCenter(new THREE.Vector3());
+  topPos.y = box.max.y + 10;
+  showHudBadge('whd', `\u25a0 ${Math.round(sz.x)} \xd7 ${Math.round(sz.y)} \xd7 ${Math.round(sz.z)} mm`, topPos, 'whd');
+}
+
+const _origUpdateHUDPos = updateHUDPositions;
+updateHUDPositions = function() {
+  _origUpdateHUDPos();
+  updateWHDBadge();
+  updateLockBtn(selectedId);
+};
+
+// =====================================================================
+// FEATURE 3: ALT + DRAG PARA DUPLICAR
+// =====================================================================
+const altDragTooltip = document.getElementById('altDragTooltip');
+let altKeyHeld = false;
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'Alt') {
+    altKeyHeld = true;
+    if (selectedId != null && altDragTooltip) altDragTooltip.style.display = 'block';
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.key === 'Alt') {
+    altKeyHeld = false;
+    if (altDragTooltip) altDragTooltip.style.display = 'none';
+  }
+});
+
+function cloneEntryByEntry(src) {
+  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
+  const opts = {
+    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
+    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
+    opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
+    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
+  };
+  if (src.kind === 'hair') opts.geometryData = serializeGeometry(src.mesh.geometry);
+  const built = buildObject(src.kind, colorHex, opts);
+  built.node.position.copy(src.mesh.position);
+  built.node.rotation.copy(src.mesh.rotation);
+  built.node.scale.copy(src.mesh.scale);
+  if (src.kind !== 'hair') copySculptIfAny(src, built.node);
+  const parentEntry = src.parentId != null ? sceneObjects.get(src.parentId) : null;
+  if (parentEntry) { parentEntry.mesh.attach(built.node); } else { scene.add(built.node); }
+  const newId = objIdCounter++;
+  built.pickMesh.userData.ownerId = newId;
+  sceneObjects.set(newId, {
+    id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh,
+    visible: true, parentId: src.parentId, sculpted: !!src.sculpted,
+    name: src.name ? src.name + ' (copia)' : null, collapsed: false
+  });
+  renderLayerList();
+  return newId;
+}
+
+wrap.addEventListener('pointerdown', (e) => {
+  if (!altKeyHeld || toolMode !== 'translate' || selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.locked || entry.kind === 'null') return;
+  const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const allPick = [];
+  sceneObjects.forEach(ent => { if (ent.pickMesh) allPick.push(ent.pickMesh); });
+  const hits = raycaster.intersectObjects(allPick, false);
+  if (!hits.length || hits[0].object.userData.ownerId !== selectedId) return;
+  e.stopPropagation();
+  const newId = cloneEntryByEntry(entry);
+  selectObject(newId);
+  altKeyHeld = false;
+  if (altDragTooltip) altDragTooltip.style.display = 'none';
+  pushHistory();
+}, { capture: true });
+
+// =====================================================================
+// FEATURE 4: LISTA DE PIEZAS
+// =====================================================================
+const partsListModal    = document.getElementById('partsListModal');
+const partsListContent  = document.getElementById('partsListContent');
+const partsListBtn      = document.getElementById('partsListBtn');
+const partsListCopyBtn  = document.getElementById('partsListCopyBtn');
+const partsListCloseBtn = document.getElementById('partsListCloseBtn');
+
+function buildPartsList() {
+  const rows = [];
+  sceneObjects.forEach(entry => {
+    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair') return;
+    if (!entry.mesh.geometry) return;
+    entry.mesh.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(entry.mesh);
+    const sz  = box.getSize(new THREE.Vector3());
+    rows.push({ name: entry.name || KIND_LABEL[entry.kind] || entry.kind, w: Math.round(sz.x), h: Math.round(sz.y), d: Math.round(sz.z) });
+  });
+  return rows;
+}
+
+function showPartsList() {
+  if (!partsListModal || !partsListContent) return;
+  const rows = buildPartsList();
+  if (!rows.length) {
+    partsListContent.innerHTML = '<p style="color:#5c6370;font-size:13px;">No hay piezas en la escena.</p>';
+  } else {
+    let html = '<table id="partsTable"><thead><tr><th>#</th><th>Nombre</th><th>Ancho mm</th><th>Alto mm</th><th>Prof. mm</th></tr></thead><tbody>';
+    rows.forEach((r, i) => {
+      html += `<tr><td>${i+1}</td><td>${r.name}</td><td class="parts-total">${r.w}</td><td class="parts-total">${r.h}</td><td class="parts-total">${r.d}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    partsListContent.innerHTML = html;
+  }
+  partsListModal.classList.add('show');
+}
+
+if (partsListBtn)      partsListBtn.addEventListener('click', showPartsList);
+if (partsListCloseBtn) partsListCloseBtn.addEventListener('click', () => partsListModal.classList.remove('show'));
+if (partsListModal)    partsListModal.addEventListener('click', e => { if (e.target === partsListModal) partsListModal.classList.remove('show'); });
+if (partsListCopyBtn) {
+  partsListCopyBtn.addEventListener('click', () => {
+    const rows = buildPartsList();
+    const txt  = ['#\tNombre\tAncho\tAlto\tProf.', ...rows.map((r, i) => `${i+1}\t${r.name}\t${r.w}\t${r.h}\t${r.d}`)].join('\n');
+    navigator.clipboard.writeText(txt).then(() => {
+      partsListCopyBtn.textContent = '✅ Copiado';
+      setTimeout(() => { partsListCopyBtn.textContent = '📋 Copiar texto'; }, 2000);
+    });
+  });
+}
+
+// =====================================================================
+// FEATURE 5: EXPORTAR OBJ
+// =====================================================================
+const exportObjBtnEl = document.getElementById('exportObjBtn');
+if (exportObjBtnEl) exportObjBtnEl.addEventListener('click', exportSceneAsOBJ);
+
+function exportSceneAsOBJ() {
+  let objStr = '# Exportado desde 3DPro\n\n';
+  let vOffset = 1;
+  sceneObjects.forEach(entry => {
+    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair') return;
+    if (!entry.mesh.geometry) return;
+    const objName = (entry.name || KIND_LABEL[entry.kind] || entry.kind).replace(/\s+/g, '_');
+    objStr += `o ${objName}\n`;
+    const geo = entry.mesh.geometry.clone();
+    geo.applyMatrix4(entry.mesh.matrixWorld);
+    const pos = geo.attributes.position;
+    const nrm = geo.attributes.normal;
+    if (!pos) { geo.dispose(); return; }
+    for (let i = 0; i < pos.count; i++)
+      objStr += `v ${pos.getX(i).toFixed(3)} ${pos.getY(i).toFixed(3)} ${pos.getZ(i).toFixed(3)}\n`;
+    if (nrm)
+      for (let i = 0; i < nrm.count; i++)
+        objStr += `vn ${nrm.getX(i).toFixed(4)} ${nrm.getY(i).toFixed(4)} ${nrm.getZ(i).toFixed(4)}\n`;
+    if (geo.index) {
+      const idx = geo.index;
+      for (let i = 0; i < idx.count; i += 3) {
+        const a = idx.getX(i)+vOffset, b = idx.getX(i+1)+vOffset, c = idx.getX(i+2)+vOffset;
+        objStr += nrm ? `f ${a}//${a} ${b}//${b} ${c}//${c}\n` : `f ${a} ${b} ${c}\n`;
+      }
+    } else {
+      for (let i = 0; i < pos.count; i += 3) {
+        const a = i+vOffset, b = i+1+vOffset, c = i+2+vOffset;
+        objStr += nrm ? `f ${a}//${a} ${b}//${b} ${c}//${c}\n` : `f ${a} ${b} ${c}\n`;
+      }
+    }
+    vOffset += pos.count;
+    objStr += '\n';
+    geo.dispose();
+  });
+  const blob = new Blob([objStr], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = '3DPro_escena.obj';
+  a.click(); URL.revokeObjectURL(url);
 }

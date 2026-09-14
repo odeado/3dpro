@@ -308,8 +308,27 @@
   .hud-badge-dist {
     background: #0f172a; color: #38bdf8; border-color: #0284c7;
   }
+  /* Etiqueta de dimensión permanente (W/H/D) mientras objeto está seleccionado */
+  .hud-badge-whd {
+    background: #1a1f2b; color: #e2e8f0; border-color: #475569;
+    font-size: 10px; padding: 2px 8px; border-radius: 10px;
+    font-weight: 600; letter-spacing: 0.3px;
+  }
+  /* Indicador de bloqueado sobre el objeto */
+  .hud-badge-locked {
+    background: #2d1b1b; color: #f87171; border-color: #ef4444;
+    font-size: 11px;
+  }
+  /* Alt+drag tooltip */
+  #altDragTooltip {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(30,34,44,0.92); color: #fbbf24; border: 1px solid #fbbf24;
+    border-radius: 10px; padding: 4px 14px; font-size: 11px; font-weight: 600;
+    pointer-events: none; display: none; white-space: nowrap; z-index: 150;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+  }
 
-  /* Modal */
+  /* Modal de Lista de Piezas */
   .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.65);
     z-index: 200; align-items: center; justify-content: center; backdrop-filter: blur(2px);
@@ -317,7 +336,7 @@
   .modal-overlay.show { display: flex; }
   .modal-box {
     background: #21252b; border: 1px solid var(--border-color); border-radius: 8px;
-    padding: 16px; width: min(380px, 90vw); max-height: 70vh; overflow-y: auto;
+    padding: 16px; width: min(560px, 95vw); max-height: 80vh; overflow-y: auto;
     display: flex; flex-direction: column; gap: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.6);
   }
   .modal-box h3 { color: #eee; margin: 0; font-size: 14px; text-transform: none; }
@@ -327,6 +346,12 @@
   }
   .proj-name { color: #abb2bf; font-size: 13px; font-weight: 500; }
   #projectListEmpty { color: #5c6370; font-size: 13px; }
+  /* Tabla de piezas */
+  #partsTable { border-collapse: collapse; width: 100%; font-size: 12px; }
+  #partsTable th { background: #181e29; color: #94a3b8; padding: 6px 8px; text-align: left; border-bottom: 1px solid #2d3748; }
+  #partsTable td { padding: 5px 8px; border-bottom: 1px solid #1e2430; color: #cbd5e1; }
+  #partsTable tr:nth-child(even) td { background: #1a1f2b; }
+  #partsTable .parts-total { color: #38bdf8; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -343,6 +368,7 @@
           <div class="dropdown-divider"></div>
           <button id="exportBtn">🖼️ Exportar PNG</button>
           <button id="exportObjBtn">📦 Exportar 3D (.OBJ)</button>
+          <button id="partsListBtn">📋 Lista de Piezas</button>
           <div class="dropdown-divider"></div>
           <button id="exportJsonBtn">📄 Guardar JSON</button>
           <button id="importJsonBtn">📥 Cargar JSON</button>
@@ -430,12 +456,25 @@
   <!-- Viewport Canvas -->
   <div id="canvasWrap">
     <div id="dimensionHud"></div>
+    <div id="altDragTooltip">⌥ Alt + Arrastrar = Duplicar</div>
     <div class="vp-divider vp-divider-v"></div>
     <div class="vp-divider vp-divider-h"></div>
     <div class="vp-label vp-tl">3D</div>
     <div class="vp-label vp-tr">Frente</div>
     <div class="vp-label vp-bl">Izq.</div>
     <div class="vp-label vp-br">Arriba</div>
+  </div>
+
+  <!-- Modal: Lista de Piezas -->
+  <div id="partsListModal" class="modal-overlay">
+    <div class="modal-box">
+      <h3>📋 Lista de Piezas</h3>
+      <div id="partsListContent"></div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:4px;">
+        <button id="partsListCopyBtn" class="context-btn" style="font-size:12px;">📋 Copiar texto</button>
+        <button id="partsListCloseBtn" class="context-btn" style="font-size:12px;">✕ Cerrar</button>
+      </div>
+    </div>
   </div>
 
   <button id="toggleSidePanelBtn" title="Contraer/Expandir Panel">▶</button>
@@ -461,6 +500,10 @@
         <!-- 1. Transformación & Medidas -->
         <h3 id="headingTransform">📐 Transformación & Medidas</h3>
         <div class="prop-group" id="transformGroup">
+          <div class="prop-row" style="justify-content:space-between; align-items:center;">
+            <label style="margin:0;">Objeto seleccionado</label>
+            <button id="lockToggleBtn" class="context-btn" style="font-size:11px; padding:3px 10px;" title="Bloquear / Desbloquear objeto (no se puede mover ni escalar)">🔓 Libre</button>
+          </div>
           <div class="prop-row">
             <label>Posición (mm)</label>
             <div class="axis-row">
