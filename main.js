@@ -393,7 +393,9 @@ function cloneObject(id) {
 
 function cloneObjectSymmetry(id) {
   const src = sceneObjects.get(id);
-  if (!src) return;
+  if (!src || src.kind === 'null') return;
+
+  const srcLabel = src.name || KIND_LABEL[src.kind] || src.kind;
   const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
   const extraOpts = {
     roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
@@ -401,46 +403,74 @@ function cloneObjectSymmetry(id) {
     opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
-  if (src.kind === 'hair') {
-    extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
-  }
-  const built = buildObject(src.kind, colorHex, extraOpts);
-  built.node.position.copy(src.mesh.position);
-  built.node.position.x = -src.mesh.position.x;
-  built.node.rotation.copy(src.mesh.rotation);
-  built.node.rotation.y = -src.mesh.rotation.y;
-  built.node.scale.copy(src.mesh.scale);
+  if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+
+  // 1. Crear el objeto espejo
+  const mirror = buildObject(src.kind, colorHex, extraOpts);
+  // El espejo empieza en posicion local cero — el Nulo determina donde va
+  mirror.node.position.set(0, 0, 0);
+  mirror.node.rotation.copy(src.mesh.rotation);
+  mirror.node.rotation.y = -src.mesh.rotation.y;
+  mirror.node.scale.copy(src.mesh.scale);
+  // Escala negativa en X = efecto espejo sin duplicar geometría
+  mirror.node.scale.x = -Math.abs(src.mesh.scale.x);
 
   let copiedSculpt = false;
   if (src.kind !== 'hair') {
-    copiedSculpt = copySculptIfAny(src, built.node);
-    if (copiedSculpt && built.node.geometry && built.node.geometry.attributes.position) {
-      const posAttr = built.node.geometry.attributes.position;
-      for (let i = 0; i < posAttr.count; i++) {
-        posAttr.setX(i, -posAttr.getX(i));
-      }
+    copiedSculpt = copySculptIfAny(src, mirror.node);
+    if (copiedSculpt && mirror.node.geometry && mirror.node.geometry.attributes.position) {
+      const posAttr = mirror.node.geometry.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
       posAttr.needsUpdate = true;
-      built.node.geometry.computeVertexNormals();
-      built.node.geometry.computeBoundingSphere();
+      mirror.node.geometry.computeVertexNormals();
+      mirror.node.geometry.computeBoundingSphere();
     }
   }
 
-  scene.add(built.node);
-  const newId = objIdCounter++;
-  built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, {
-    id: newId,
-    kind: src.kind,
-    mesh: built.node,
-    pickMesh: built.pickMesh,
-    visible: true,
-    parentId: null,
-    sculpted: copiedSculpt,
-    name: (src.name || KIND_LABEL[src.kind] || src.kind) + ' (Espejo X)',
-    collapsed: false
+  // 2. Crear el Nulo contenedor (Simetría)
+  const nullBuilt = buildObject('null', undefined, {});
+  // Centrar el Nulo entre el original y donde irá el espejo (en X=0)
+  const worldPos = new THREE.Vector3();
+  src.mesh.getWorldPosition(worldPos);
+  nullBuilt.node.position.set(0, worldPos.y, worldPos.z);
+  scene.add(nullBuilt.node);
+  const nullId = objIdCounter++;
+  nullBuilt.pickMesh.userData.ownerId = nullId;
+  sceneObjects.set(nullId, {
+    id: nullId, kind: 'null', mesh: nullBuilt.node, pickMesh: nullBuilt.pickMesh,
+    visible: true, parentId: null, sculpted: false,
+    name: `🪞 Simetría (${srcLabel})`, collapsed: false,
+    symmetrySourceId: id   // marca especial para saber cual es el original
   });
+
+  // 3. Meter el espejo dentro del Nulo
+  scene.add(mirror.node);
+  const mirrorId = objIdCounter++;
+  mirror.pickMesh.userData.ownerId = mirrorId;
+  sceneObjects.set(mirrorId, {
+    id: mirrorId, kind: src.kind, mesh: mirror.node, pickMesh: mirror.pickMesh,
+    visible: true, parentId: nullId, sculpted: copiedSculpt,
+    name: srcLabel + ' (Espejo X)', collapsed: false,
+    isMirrorOf: id   // marca especial
+  });
+  nullBuilt.node.attach(mirror.node); // conserva posicion mundo
+
+  // 4. Meter el original dentro del Nulo también
+  nullBuilt.node.attach(src.mesh); // conserva posicion mundo
+  src.parentId = nullId;
+
+  // 5. Posicionar el espejo al lado opuesto del original dentro del Nulo
+  const localPos = new THREE.Vector3();
+  src.mesh.parent.worldToLocal(worldPos.clone(), localPos);
+  src.mesh.getWorldPosition(worldPos);
+  nullBuilt.node.worldToLocal(worldPos);
+  src.mesh.position.copy(worldPos);
+  const mwp = worldPos.clone();
+  mwp.x = -worldPos.x;
+  mirror.node.position.copy(mwp);
+
   renderLayerList();
-  selectObject(newId);
+  selectObject(nullId);
   pushHistory();
 }
 
@@ -1842,6 +1872,31 @@ function animate() {
       updateHairPreview();
     }
   }
+  // Live symmetry: for every mirror object, track the original's local transform
+  sceneObjects.forEach(entry => {
+    if (!entry.isMirrorOf) return;
+    const srcEntry = sceneObjects.get(entry.isMirrorOf);
+    if (!srcEntry) return;
+    // Mirror position: flip X relative to parent (Null center)
+    entry.mesh.position.set(
+      -srcEntry.mesh.position.x,
+      srcEntry.mesh.position.y,
+      srcEntry.mesh.position.z
+    );
+    // Mirror rotation: flip Y axis
+    entry.mesh.rotation.set(
+      srcEntry.mesh.rotation.x,
+      -srcEntry.mesh.rotation.y,
+      srcEntry.mesh.rotation.z
+    );
+    // Mirror scale: flip X
+    entry.mesh.scale.set(
+      -Math.abs(srcEntry.mesh.scale.x),
+      srcEntry.mesh.scale.y,
+      srcEntry.mesh.scale.z
+    );
+  });
+
   if (fourViewMode) {
     renderFourView();
     transform.camera = activeCamera; // deja la camara "activa" lista para el picking/gizmo del cuadrante tocado
