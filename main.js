@@ -2536,7 +2536,7 @@ wrap.addEventListener('pointerdown', (e) => {
     const hits = raycaster.intersectObjects(handleMeshes, false);
     if (hits.length > 0) {
       e.stopPropagation();
-      startHandleDrag(hits[0].object);
+      startHandleDrag(hits[0].object, e.clientX, e.clientY); // ← pasar coordenadas
       return;
     }
   }
