@@ -197,6 +197,24 @@
   .btn-mirror { background: #1a2a3d !important; border-color: #204060 !important; color: #6bb8ff !important; }
   .btn-mirror:hover { background: #1e3352 !important; }
 
+  /* Fix: propsPanel set to flex by JS, must be column */
+  #propsPanel {
+    display: none; flex-direction: column; gap: 10px; width: 100%; box-sizing: border-box;
+  }
+
+  /* Array Cloner Modal */
+  .modal-field { display: flex; flex-direction: column; gap: 4px; }
+  .modal-field label { font-size: 11px; color: #5c6370; text-transform: uppercase; letter-spacing: 0.04em; }
+  .modal-field input[type="number"], .modal-field select {
+    background: #282c34; border: 1px solid var(--border-color); color: #abb2bf;
+    border-radius: 4px; padding: 6px 8px; font-size: 13px; width: 100%; box-sizing: border-box;
+  }
+  .modal-field input[type="number"]:focus, .modal-field select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .modal-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #arrayLinearOpts, #arrayCircularOpts { display: flex; flex-direction: column; gap: 10px; }
+
   /* 5. Bottom Status Bar */
   #statusBar {
     position: fixed; bottom: 0; left: 0; right: 0; height: var(--status-h);
@@ -399,14 +417,15 @@
           <button id="focusCamBtn" class="context-btn" style="justify-content:center;">🔍 Enfocar (F)</button>
         </div>
 
-        <!-- Simetría -->
+        <!-- Simetría & Clonado -->
         <h3>Simetría & Clonado</h3>
         <div class="prop-group">
-          <button id="cloneSymBtn" class="context-btn btn-mirror" style="justify-content:center;">🪞 Clonar Espejo (grupo Nulo)</button>
+          <button id="cloneSymBtn" class="context-btn btn-mirror" style="justify-content:center;">🪞 Espejo (Simetría X)</button>
+          <button id="arrayCloneBtn" class="context-btn" style="justify-content:center; background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">🔁 Clonador de Matriz...</button>
         </div>
 
         <!-- Eliminar -->
-        <div class="prop-group" style="margin-top:4px;">
+        <div class="prop-group">
           <button id="deleteObjBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Eliminar objeto (Del)</button>
         </div>
       </div>
@@ -440,6 +459,70 @@
       <div id="projectListModal"></div>
       <p id="projectListEmpty">Todavía no guardaste ningún diseño.</p>
       <button id="closeOpenModal" class="context-btn" style="align-self:flex-end; margin-top:8px;">Cerrar</button>
+    </div>
+  </div>
+
+  <!-- Array Cloner Modal -->
+  <div id="arrayModal" class="modal-overlay">
+    <div class="modal-box" style="width:min(340px,92vw);">
+      <h3>🔁 Clonador de Matriz</h3>
+
+      <div class="modal-field">
+        <label>Modo</label>
+        <select id="arrayMode">
+          <option value="linear">Lineal (fila)</option>
+          <option value="circular">Circular (corona)</option>
+          <option value="grid">Cuadrícula (3D)</option>
+        </select>
+      </div>
+
+      <div class="modal-field">
+        <label>Cantidad de copias</label>
+        <input id="arrayCount" type="number" min="1" max="100" value="3">
+      </div>
+
+      <!-- LINEAR options -->
+      <div id="arrayLinearOpts">
+        <p style="color:#5c6370; font-size:11px; margin:0;">Separación entre cada copia:</p>
+        <div class="modal-row2">
+          <div class="modal-field"><label>X</label><input id="arrayOffsetX" type="number" value="80" step="10"></div>
+          <div class="modal-field"><label>Y</label><input id="arrayOffsetY" type="number" value="0" step="10"></div>
+        </div>
+        <div class="modal-field"><label>Z</label><input id="arrayOffsetZ" type="number" value="0" step="10"></div>
+      </div>
+
+      <!-- CIRCULAR options -->
+      <div id="arrayCircularOpts" style="display:none;">
+        <div class="modal-field"><label>Radio</label><input id="arrayRadius" type="number" value="120" step="10"></div>
+        <div class="modal-field"><label>Eje de rotación</label>
+          <select id="arrayAxis">
+            <option value="y">Y (horizontal)</option>
+            <option value="x">X</option>
+            <option value="z">Z</option>
+          </select>
+        </div>
+        <div class="modal-field"><label>Rotar copias también (°)</label><input id="arrayRotateCopies" type="checkbox" checked style="width:auto;"></div>
+      </div>
+
+      <!-- GRID options -->
+      <div id="arrayGridOpts" style="display:none;">
+        <p style="color:#5c6370; font-size:11px; margin:0;">Copias por eje (X × Y × Z):</p>
+        <div class="modal-row2">
+          <div class="modal-field"><label>Cols (X)</label><input id="arrayGridX" type="number" value="3" min="1" max="20"></div>
+          <div class="modal-field"><label>Filas (Z)</label><input id="arrayGridZ" type="number" value="3" min="1" max="20"></div>
+        </div>
+        <div class="modal-field"><label>Pisos (Y)</label><input id="arrayGridY" type="number" value="1" min="1" max="20"></div>
+        <div class="modal-row2">
+          <div class="modal-field"><label>Sep X</label><input id="arrayGridSepX" type="number" value="80" step="10"></div>
+          <div class="modal-field"><label>Sep Z</label><input id="arrayGridSepZ" type="number" value="80" step="10"></div>
+        </div>
+        <div class="modal-field"><label>Sep Y</label><input id="arrayGridSepY" type="number" value="80" step="10"></div>
+      </div>
+
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:4px;">
+        <button id="arrayCancelBtn" class="context-btn">Cancelar</button>
+        <button id="arrayApplyBtn" class="context-btn" style="background:#2a4a2a; border-color:#3a7a3a; color:#88dd88; font-weight:bold;">✅ Crear</button>
+      </div>
     </div>
   </div>
 

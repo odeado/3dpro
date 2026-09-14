@@ -308,9 +308,12 @@ function buildObject(kind, colorHex, extra) {
 }
 
 let placeAngle = 0;
+let placeCount = 0;
 function nextPlacement() {
+  if (placeCount === 0) { placeCount++; return { x: 0, y: 0, z: 0 }; }
+  placeCount++;
   const radius = 110;
-  const p = { x: Math.cos(placeAngle) * radius, y: 40, z: Math.sin(placeAngle) * radius };
+  const p = { x: Math.cos(placeAngle) * radius, y: 0, z: Math.sin(placeAngle) * radius };
   placeAngle += Math.PI / 3;
   return p;
 }
@@ -1914,5 +1917,170 @@ pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el p
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+// =====================================================================
+// CLONADOR DE MATRIZ (Linear / Circular / Grid)
+// =====================================================================
+const arrayModal   = document.getElementById('arrayModal');
+const arrayMode    = document.getElementById('arrayMode');
+const arrayCount   = document.getElementById('arrayCount');
+const arrayLinearOpts   = document.getElementById('arrayLinearOpts');
+const arrayCircularOpts = document.getElementById('arrayCircularOpts');
+const arrayGridOpts     = document.getElementById('arrayGridOpts');
+const arrayApplyBtn  = document.getElementById('arrayApplyBtn');
+const arrayCancelBtn = document.getElementById('arrayCancelBtn');
+const arrayCloneBtn  = document.getElementById('arrayCloneBtn');
+
+// Show/hide sub-options when mode changes
+if (arrayMode) {
+  arrayMode.addEventListener('change', () => {
+    arrayLinearOpts.style.display   = arrayMode.value === 'linear'   ? 'flex' : 'none';
+    arrayCircularOpts.style.display = arrayMode.value === 'circular' ? 'flex' : 'none';
+    arrayGridOpts.style.display     = arrayMode.value === 'grid'     ? 'flex' : 'none';
+  });
+}
+
+if (arrayCloneBtn) {
+  arrayCloneBtn.addEventListener('click', () => {
+    if (selectedId == null) return;
+    arrayModal.classList.add('show');
+  });
+}
+if (arrayCancelBtn) arrayCancelBtn.addEventListener('click', () => arrayModal.classList.remove('show'));
+arrayModal && arrayModal.addEventListener('click', e => { if (e.target === arrayModal) arrayModal.classList.remove('show'); });
+
+// Helper: deep-clone a sceneObject entry into the scene
+function cloneEntryAt(src, positionWorld) {
+  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
+  const extraOpts = {
+    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
+    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
+    opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
+    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
+  };
+  if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  const built = buildObject(src.kind, colorHex, extraOpts);
+  built.node.rotation.copy(src.mesh.rotation);
+  built.node.scale.copy(src.mesh.scale);
+  if (src.kind !== 'hair') copySculptIfAny(src, built.node);
+  built.node.position.copy(positionWorld);
+  scene.add(built.node);
+  const newId = objIdCounter++;
+  built.pickMesh.userData.ownerId = newId;
+  sceneObjects.set(newId, {
+    id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh,
+    visible: true, parentId: null, sculpted: !!src.sculpted,
+    name: src.name ? src.name + ' (copia)' : null, collapsed: false
+  });
+  return newId;
+}
+
+// Create a Null group and parent all given IDs into it
+function groupIds(ids, groupName) {
+  const nullBuilt = buildObject('null', undefined, {});
+  scene.add(nullBuilt.node);
+  const nullId = objIdCounter++;
+  nullBuilt.pickMesh.userData.ownerId = nullId;
+  sceneObjects.set(nullId, {
+    id: nullId, kind: 'null', mesh: nullBuilt.node, pickMesh: nullBuilt.pickMesh,
+    visible: true, parentId: null, sculpted: false,
+    name: groupName, collapsed: false
+  });
+  ids.forEach(id => {
+    const e = sceneObjects.get(id);
+    if (!e) return;
+    nullBuilt.node.attach(e.mesh);
+    e.parentId = nullId;
+  });
+  return nullId;
+}
+
+if (arrayApplyBtn) {
+  arrayApplyBtn.addEventListener('click', () => {
+    const src = sceneObjects.get(selectedId);
+    if (!src) { arrayModal.classList.remove('show'); return; }
+
+    const mode  = arrayMode.value;
+    const count = Math.max(1, Math.min(100, parseInt(arrayCount.value) || 3));
+    const srcPos = new THREE.Vector3();
+    src.mesh.getWorldPosition(srcPos);
+    const srcLabel = src.name || KIND_LABEL[src.kind] || src.kind;
+
+    const createdIds = [selectedId]; // include original
+
+    if (mode === 'linear') {
+      const ox = parseFloat(document.getElementById('arrayOffsetX').value) || 80;
+      const oy = parseFloat(document.getElementById('arrayOffsetY').value) || 0;
+      const oz = parseFloat(document.getElementById('arrayOffsetZ').value) || 0;
+      for (let i = 1; i <= count; i++) {
+        const pos = srcPos.clone().add(new THREE.Vector3(ox * i, oy * i, oz * i));
+        createdIds.push(cloneEntryAt(src, pos));
+      }
+      const nullId = groupIds(createdIds, `🔁 Lineal (${srcLabel})`);
+      renderLayerList(); selectObject(nullId); pushHistory();
+
+    } else if (mode === 'circular') {
+      const radius   = parseFloat(document.getElementById('arrayRadius').value) || 120;
+      const axis     = document.getElementById('arrayAxis').value;
+      const doRotate = document.getElementById('arrayRotateCopies').checked;
+      const total    = count + 1; // include original position
+      const angleStep = (Math.PI * 2) / total;
+
+      // Reposition the original to first slot on the circle
+      const angle0 = 0;
+      const firstPos = srcPos.clone();
+      if (axis === 'y') { firstPos.x = srcPos.x + Math.cos(angle0) * radius; firstPos.z = srcPos.z + Math.sin(angle0) * radius; }
+      else if (axis === 'x') { firstPos.y = srcPos.y + Math.cos(angle0) * radius; firstPos.z = srcPos.z + Math.sin(angle0) * radius; }
+      else { firstPos.x = srcPos.x + Math.cos(angle0) * radius; firstPos.y = srcPos.y + Math.sin(angle0) * radius; }
+      src.mesh.position.copy(firstPos);
+
+      for (let i = 1; i < total; i++) {
+        const a = angleStep * i;
+        const pos = srcPos.clone();
+        if (axis === 'y') { pos.x = srcPos.x + Math.cos(a) * radius; pos.z = srcPos.z + Math.sin(a) * radius; }
+        else if (axis === 'x') { pos.y = srcPos.y + Math.cos(a) * radius; pos.z = srcPos.z + Math.sin(a) * radius; }
+        else { pos.x = srcPos.x + Math.cos(a) * radius; pos.y = srcPos.y + Math.sin(a) * radius; }
+        const newId = cloneEntryAt(src, pos);
+        if (doRotate) {
+          const e = sceneObjects.get(newId);
+          if (e) {
+            if (axis === 'y') e.mesh.rotation.y = src.mesh.rotation.y + a;
+            else if (axis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
+            else e.mesh.rotation.z = src.mesh.rotation.z + a;
+          }
+        }
+        createdIds.push(newId);
+      }
+      const nullId = groupIds(createdIds, `🔁 Circular (${srcLabel})`);
+      renderLayerList(); selectObject(nullId); pushHistory();
+
+    } else if (mode === 'grid') {
+      const gx = Math.max(1, parseInt(document.getElementById('arrayGridX').value) || 3);
+      const gz = Math.max(1, parseInt(document.getElementById('arrayGridZ').value) || 3);
+      const gy = Math.max(1, parseInt(document.getElementById('arrayGridY').value) || 1);
+      const sx = parseFloat(document.getElementById('arrayGridSepX').value) || 80;
+      const sz = parseFloat(document.getElementById('arrayGridSepZ').value) || 80;
+      const sy = parseFloat(document.getElementById('arrayGridSepY').value) || 80;
+      // Center the grid around the original
+      const startX = srcPos.x - (gx - 1) * sx / 2;
+      const startY = srcPos.y;
+      const startZ = srcPos.z - (gz - 1) * sz / 2;
+      let first = true;
+      for (let iy = 0; iy < gy; iy++) {
+        for (let iz = 0; iz < gz; iz++) {
+          for (let ix = 0; ix < gx; ix++) {
+            const pos = new THREE.Vector3(startX + ix * sx, startY + iy * sy, startZ + iz * sz);
+            if (first) { src.mesh.position.copy(pos); first = false; continue; }
+            createdIds.push(cloneEntryAt(src, pos));
+          }
+        }
+      }
+      const nullId = groupIds(createdIds, `🔁 Cuadrícula (${srcLabel})`);
+      renderLayerList(); selectObject(nullId); pushHistory();
+    }
+
+    arrayModal.classList.remove('show');
   });
 }
