@@ -3,13 +3,28 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>Editor 3D</title>
+<title>3DPro Editor</title>
 <link rel="manifest" href="./manifest.json">
 <link rel="icon" href="./icons/icon-32.png">
 <link rel="apple-touch-icon" href="./icons/icon-180.png">
-<meta name="theme-color" content="#e0762f">
+<meta name="theme-color" content="#1e2227">
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #2b2f33; font-family: system-ui, sans-serif; }
+  :root {
+    --bg-main: #1e2227;
+    --bg-panel: rgba(26, 29, 34, 0.96);
+    --bg-hover: #333842;
+    --bg-active: #ffcc33;
+    --fg-active: #181a1f;
+    --border-color: #333842;
+    --accent: #ffcc33;
+    --header-h: 36px;
+    --context-h: 36px;
+    --left-w: 48px;
+    --right-w: 250px;
+    --status-h: 24px;
+  }
+
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg-main); font-family: system-ui, -apple-system, sans-serif; color: #abb2bf; user-select: none; }
   #canvasWrap { position: fixed; top: 120px; left: 0; right: 220px; bottom: 0; touch-action: none; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
@@ -133,38 +148,97 @@
 </style>
 </head>
 <body>
-  <button id="toggleSidePanelBtn" class="hbtn iconbtn" title="Mostrar/ocultar panel">▶</button>
-  <div id="toolbar">
-    <div class="row">
-      <button class="abtn" data-add="cube">🧊 Cubo</button>
-      <button class="abtn" data-add="sphere">⚪ Esfera</button>
-      <button class="abtn" data-add="cylinder">🥫 Cilindro</button>
-      <button class="abtn" data-add="cone">🔺 Cono</button>
-      <button class="abtn" data-add="plane">▭ Plano</button>
-      <button class="abtn" data-add="torus">🍩 Toroide</button>
-      <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
+  <!-- 1. Header Bar (Cinema 4D / Blender style main header) -->
+  <header id="mainHeader">
+    <div class="header-left">
+      <div class="brand">🎨 3DPro</div>
+
+      <div class="dropdown" id="fileMenu">
+        <button class="dropbtn">Archivo ▾</button>
+        <div class="dropdown-content">
+          <button id="saveBtn">💾 Guardar local</button>
+          <button id="openBtn">📂 Abrir local</button>
+          <div class="dropdown-divider"></div>
+          <button id="exportBtn">🖼️ Exportar PNG</button>
+          <button id="exportObjBtn">📦 Exportar 3D (.OBJ)</button>
+          <div class="dropdown-divider"></div>
+          <button id="exportJsonBtn">📄 Guardar JSON</button>
+          <button id="importJsonBtn">📥 Cargar JSON</button>
+          <input id="importJsonInput" type="file" accept=".json,.3dpro" style="display:none;">
+        </div>
+      </div>
+
+      <div class="dropdown" id="editMenu">
+        <button class="dropbtn">Editar ▾</button>
+        <div class="dropdown-content">
+          <button id="menuUndoBtn">↶ Deshacer (Ctrl+Z)</button>
+          <button id="menuRedoBtn">↷ Rehacer (Ctrl+Y)</button>
+        </div>
+      </div>
+
+      <div class="dropdown" id="addMenu">
+        <button class="dropbtn">Agregar ▾</button>
+        <div class="dropdown-content">
+          <button class="abtn" data-add="cube">🧊 Cubo</button>
+          <button class="abtn" data-add="sphere">⚪ Esfera</button>
+          <button class="abtn" data-add="cylinder">🥫 Cilindro</button>
+          <button class="abtn" data-add="cone">🔺 Cono</button>
+          <button class="abtn" data-add="plane">▭ Plano</button>
+          <button class="abtn" data-add="torus">🍩 Toroide</button>
+          <div class="dropdown-divider"></div>
+          <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
+        </div>
+      </div>
+
+      <div class="dropdown" id="viewMenu">
+        <button class="dropbtn">Vista ▾</button>
+        <div class="dropdown-content">
+          <button id="fourViewBtn">🔳 4 Vistas (Quad View)</button>
+          <div class="dropdown-divider"></div>
+          <button class="vbtn" data-view="perspective">Perspective (3D)</button>
+          <button class="vbtn" data-view="front">Frente (Front)</button>
+          <button class="vbtn" data-view="back">Atrás (Back)</button>
+          <button class="vbtn" data-view="left">Izquierda (Left)</button>
+          <button class="vbtn" data-view="right">Derecha (Right)</button>
+          <button class="vbtn" data-view="top">Arriba (Top)</button>
+          <button class="vbtn" data-view="bottom">Abajo (Bottom)</button>
+        </div>
+      </div>
     </div>
-    <div class="row">
-      <button class="tbtn" data-mode="translate">↔️ Mover (G)</button>
-      <button class="tbtn" data-mode="rotate">🔄 Rotar (R)</button>
-      <button class="tbtn" data-mode="scale">↕️ Escalar (S)</button>
-      <button class="tbtn" data-mode="sculpt">🖌️ Esculpir</button>
-      <button class="tbtn" data-mode="hair">💇 Pelo</button>
-      <button id="undoBtn" class="hbtn iconbtn" title="Deshacer (Ctrl+Z)">↶</button>
-      <button id="redoBtn" class="hbtn iconbtn" title="Rehacer (Ctrl+Y)">↷</button>
+
+    <div class="header-right">
+      <button id="undoBtn" class="header-icon-btn" title="Deshacer (Ctrl+Z)">↶</button>
+      <button id="redoBtn" class="header-icon-btn" title="Rehacer (Ctrl+Y)">↷</button>
     </div>
-    <div class="row" id="brushRow" style="display:none;">
-      <button class="tbtn active" data-brush="push">⬆️ Empujar</button>
-      <button class="tbtn" data-brush="pull">⬇️ Hundir</button>
-      <button class="tbtn" data-brush="smooth">🌊 Suavizar</button>
-      <button class="tbtn" data-brush="pinch">🤏 Pellizcar</button>
-      <button class="tbtn" data-brush="flatten">🛏️ Aplanar</button>
-      <label class="brush-slider">Tamaño<input id="brushSize" type="range" min="8" max="60" step="1" value="24"></label>
-      <label class="brush-slider">Fuerza<input id="brushStrength" type="range" min="1" max="10" step="1" value="4"></label>
-      <label class="brush-slider" style="margin-left:4px;"><input id="symmetryX" type="checkbox"> 🪞 Simetría X</label>
+  </header>
+
+  <!-- 2. Tool Options Context Bar (Shows active tool parameters) -->
+  <div id="contextBar">
+    <div id="defaultToolOptions" class="context-group">
+      <span style="color:#5c6370; font-size:12px;">Modo Selección / Transformación</span>
+    </div>
+    <div id="brushRow" class="context-group" style="display:none;">
+      <button class="context-btn active" data-brush="push">⬆️ Empujar</button>
+      <button class="context-btn" data-brush="pull">⬇️ Hundir</button>
+      <button class="context-btn" data-brush="smooth">🌊 Suavizar</button>
+      <button class="context-btn" data-brush="pinch">🤏 Pellizcar</button>
+      <button class="context-btn" data-brush="flatten">🛏️ Aplanar</button>
+      <label class="context-slider">Tamaño<input id="brushSize" type="range" min="8" max="60" step="1" value="24"></label>
+      <label class="context-slider">Fuerza<input id="brushStrength" type="range" min="1" max="10" step="1" value="4"></label>
+      <label class="context-slider" style="margin-left:4px;"><input id="symmetryX" type="checkbox"> 🪞 Simetría X</label>
     </div>
   </div>
 
+  <!-- 3. Left Vertical Tool Palette (Blender / C4D T-Panel) -->
+  <aside id="leftToolbar">
+    <button class="tool-btn tbtn active" data-mode="translate" title="Mover (G)">↔️</button>
+    <button class="tool-btn tbtn" data-mode="rotate" title="Rotar (R)">🔄</button>
+    <button class="tool-btn tbtn" data-mode="scale" title="Escalar (S)">↕️</button>
+    <button class="tool-btn tbtn" data-mode="sculpt" title="Esculpir (Pincel)">🖌️</button>
+    <button class="tool-btn tbtn" data-mode="hair" title="Dibujar Pelo">💇</button>
+  </aside>
+
+  <!-- Viewport Canvas -->
   <div id="canvasWrap">
     <div class="vp-divider vp-divider-v"></div>
     <div class="vp-divider vp-divider-h"></div>
@@ -174,71 +248,74 @@
     <div class="vp-label vp-br">Arriba</div>
   </div>
 
-  <div id="sidePanel">
-    <div class="section">
-      <h3>🎥 Vista</h3>
-      <button id="fourViewBtn" class="hbtn" style="width:100%; box-sizing:border-box;">🔳 4 vistas a la vez</button>
-      <div class="view-grid">
-        <button class="vbtn" data-view="perspective">3D</button>
-        <button class="vbtn" data-view="front">Frente</button>
-        <button class="vbtn" data-view="back">Atrás</button>
-        <button class="vbtn" data-view="left">Izquierda</button>
-        <button class="vbtn" data-view="right">Derecha</button>
-        <button class="vbtn" data-view="top">Arriba</button>
-        <button class="vbtn" data-view="bottom">Abajo</button>
-      </div>
+  <button id="toggleSidePanelBtn" title="Contraer/Expandir Panel">▶</button>
+  <!-- 4. Right Panel with Outliner, Attributes and Environment tabs -->
+  <aside id="rightPanel">
+    <div class="panel-tabs">
+      <button class="tab-btn active" data-tab="tabObjects">🗂️ Objetos</button>
+      <button class="tab-btn" data-tab="tabAttributes">🎨 Atributos</button>
+      <button class="tab-btn" data-tab="tabEnvironment">💡 Entorno</button>
     </div>
 
-    <div class="section">
-      <h3>Archivo</h3>
-      <div class="file-grid">
-        <button id="saveBtn" class="hbtn">💾 Guardar local</button>
-        <button id="openBtn" class="hbtn">📂 Abrir local</button>
-        <button id="exportBtn" class="hbtn">🖼️ Exportar imagen PNG</button>
-        <button id="exportObjBtn" class="hbtn">📦 Exportar 3D (.OBJ)</button>
-        <button id="exportJsonBtn" class="hbtn">📄 Guardar archivo JSON</button>
-        <button id="importJsonBtn" class="hbtn">📥 Cargar archivo JSON</button>
-        <input id="importJsonInput" type="file" accept=".json,.3dpro" style="display:none;">
-      </div>
-    </div>
-
-    <div class="section">
-      <h3>💡 Luz y Sombras</h3>
-      <div id="lightRow"><input id="lightRange" type="range" min="0.4" max="2" step="0.05" value="1"></div>
-      <label style="color:#ccc; font-size:12px; display:flex; align-items:center; gap:6px; margin-top:4px;">
-        <input id="shadowToggle" type="checkbox" checked> 🌘 Sombras proyectadas
-      </label>
-    </div>
-
-    <div class="section" style="border-bottom:none; flex:1;">
-      <h3>Objetos</h3>
+    <!-- Tab 1: Objects Outliner Tree -->
+    <div id="tabObjects" class="tab-content active">
+      <h3>Jerarquía de Objetos</h3>
       <div id="layerList"></div>
-      <p id="layerEmpty">Todavía no agregaste nada.</p>
+      <p id="layerEmpty">No hay objetos en la escena.</p>
+    </div>
+
+    <!-- Tab 2: Material & Object Attributes -->
+    <div id="tabAttributes" class="tab-content">
+      <h3>Atributos del Objeto</h3>
       <div id="propsPanel">
-        <h4 style="margin:2px 0 4px; color:#ffcc33; font-size:13px;">Propiedades de Objeto</h4>
-        <label>Color <input id="propsColor" type="color" value="#e0762f"></label>
-        <label>Mate/Rugoso <input id="propsRoughness" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-        <label>Metalizado <input id="propsMetalness" type="range" min="0" max="1" step="0.05" value="0.05"></label>
-        <label>Opacidad <input id="propsOpacity" type="range" min="0.1" max="1" step="0.05" value="1"></label>
-        <label style="cursor:pointer;"><input id="propsWireframe" type="checkbox"> 🕸️ Estructura (Wireframe)</label>
-        
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:4px; margin-top:4px;">
-          <button id="alignOriginBtn" class="vbtn" style="font-size:12px; padding:6px;" title="Llevar al centro (0,y,0)">🎯 Centrar</button>
-          <button id="alignGroundBtn" class="vbtn" style="font-size:12px; padding:6px;" title="Apoyar en el suelo">⬇️ Al suelo</button>
+        <div class="prop-group">
+          <div class="prop-row"><label>Color Base</label><input id="propsColor" type="color" value="#e0762f"></div>
+          <div class="prop-row"><label>Rugosidad</label><input id="propsRoughness" type="range" min="0" max="1" step="0.05" value="0.5"></div>
+          <div class="prop-row"><label>Metalizado</label><input id="propsMetalness" type="range" min="0" max="1" step="0.05" value="0.05"></div>
+          <div class="prop-row"><label>Opacidad</label><input id="propsOpacity" type="range" min="0.1" max="1" step="0.05" value="1"></div>
+          <div class="prop-row"><label>Wireframe</label><input id="propsWireframe" type="checkbox"></div>
         </div>
-        <button id="focusCamBtn" class="vbtn" style="font-size:12px; padding:6px; width:100%; margin-top:2px;" title="Centrar cámara en el objeto (F)">🔍 Enfocar cámara (F)</button>
+
+        <h3 style="margin-top:10px;">Alineación & Cámara</h3>
+        <div class="prop-group">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+            <button id="alignOriginBtn" class="context-btn">🎯 Centrar</button>
+            <button id="alignGroundBtn" class="context-btn">⬇️ Al suelo</button>
+          </div>
+          <button id="focusCamBtn" class="context-btn" style="margin-top:4px;">🔍 Enfocar selección (F)</button>
+        </div>
+      </div>
+      <p id="noSelectionMsg" style="color:#5c6370; font-size:12px; text-align:center; margin-top:20px;">Seleccioná un objeto para editar sus atributos.</p>
+    </div>
+
+    <!-- Tab 3: Environment & Lighting -->
+    <div id="tabEnvironment" class="tab-content">
+      <h3>Iluminación & Escena</h3>
+      <div class="prop-group">
+        <div class="prop-row">
+          <label>Intensidad Luz</label>
+          <input id="lightRange" type="range" min="0.4" max="2" step="0.05" value="1">
+        </div>
+        <div class="prop-row">
+          <label>Sombras proyectadas</label>
+          <input id="shadowToggle" type="checkbox" checked>
+        </div>
       </div>
     </div>
-  </div>
+  </aside>
 
-  <div id="hint">Atajos: <b>G</b> Mover · <b>R</b> Rotar · <b>S</b> Escalar · <b>F</b> Enfocar · <b>Del</b> Borrar · <b>Shift+D</b> Clonar · <b>Ctrl+Z/Y</b> Deshacer/Rehacer · En 🖌️ Esculpir podés activar 🪞 Simetría X</div>
+  <!-- 5. Bottom Status Bar -->
+  <footer id="statusBar">
+    <span id="statusInfo">Editor 3D - Modo Mover</span>
+    <span id="statusHint">G: Mover | R: Rotar | S: Escalar | F: Enfocar | Del: Borrar | Shift+D: Clonar</span>
+  </footer>
 
   <div id="openModal" class="modal-overlay">
     <div class="modal-box">
-      <h3>Mis diseños</h3>
+      <h3>Mis diseños guardados</h3>
       <div id="projectListModal"></div>
       <p id="projectListEmpty">Todavía no guardaste ningún diseño.</p>
-      <button id="closeOpenModal" class="hbtn">Cerrar</button>
+      <button id="closeOpenModal" class="context-btn" style="align-self:flex-end; margin-top:8px;">Cerrar</button>
     </div>
   </div>
 

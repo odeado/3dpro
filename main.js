@@ -26,7 +26,7 @@ const importJsonBtn = document.getElementById('importJsonBtn');
 const importJsonInput = document.getElementById('importJsonInput');
 const shadowToggle = document.getElementById('shadowToggle');
 const toggleSidePanelBtn = document.getElementById('toggleSidePanelBtn');
-const sidePanel = document.getElementById('sidePanel');
+const rightPanel = document.getElementById('rightPanel');
 const symmetryXInput = document.getElementById('symmetryX');
 const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
@@ -484,24 +484,29 @@ function setColor(id, hex) {
   entry.mesh.material.color.set(hex);
 }
 
+const noSelectionMsg = document.getElementById('noSelectionMsg');
+
 function selectObject(id) {
   selectedId = id;
   const entry = id != null ? sceneObjects.get(id) : null;
   if (entry) {
     if (toolMode === 'sculpt' || toolMode === 'hair') transform.detach(); else transform.attach(entry.mesh);
     if (entry.mesh.material) {
-      propsPanel.classList.add('show');
+      propsPanel.style.display = 'flex';
+      if (noSelectionMsg) noSelectionMsg.style.display = 'none';
       propsColor.value = '#' + entry.mesh.material.color.getHexString();
       propsRoughness.value = entry.mesh.material.roughness != null ? entry.mesh.material.roughness : 0.5;
       propsMetalness.value = entry.mesh.material.metalness != null ? entry.mesh.material.metalness : 0.05;
       propsOpacity.value = entry.mesh.material.opacity != null ? entry.mesh.material.opacity : 1.0;
       propsWireframe.checked = !!entry.mesh.material.wireframe;
     } else {
-      propsPanel.classList.remove('show');
+      propsPanel.style.display = 'none';
+      if (noSelectionMsg) noSelectionMsg.style.display = 'block';
     }
   } else {
     transform.detach();
-    propsPanel.classList.remove('show');
+    propsPanel.style.display = 'none';
+    if (noSelectionMsg) noSelectionMsg.style.display = 'block';
   }
   renderLayerList();
 }
@@ -590,10 +595,44 @@ shadowToggle.addEventListener('change', () => {
 });
 
 toggleSidePanelBtn.addEventListener('click', () => {
-  sidePanel.classList.toggle('collapsed');
-  document.body.classList.toggle('side-collapsed', sidePanel.classList.contains('collapsed'));
-  toggleSidePanelBtn.textContent = sidePanel.classList.contains('collapsed') ? '◀' : '▶';
+  rightPanel.classList.toggle('collapsed');
+  document.body.classList.toggle('side-collapsed', rightPanel.classList.contains('collapsed'));
+  toggleSidePanelBtn.textContent = rightPanel.classList.contains('collapsed') ? '◀' : '▶';
   handleResize();
+});
+
+// --- Lógica de Menús Desplegables Header ---
+document.querySelectorAll('.dropdown .dropbtn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const dropdown = btn.parentElement;
+    const isShow = dropdown.classList.contains('show');
+    document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+    if (!isShow) dropdown.classList.add('show');
+  });
+});
+window.addEventListener('click', () => {
+  document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+});
+
+const menuUndoBtn = document.getElementById('menuUndoBtn');
+const menuRedoBtn = document.getElementById('menuRedoBtn');
+if (menuUndoBtn) menuUndoBtn.addEventListener('click', () => undoBtn.click());
+if (menuRedoBtn) menuRedoBtn.addEventListener('click', () => redoBtn.click());
+
+// --- Lógica de Pestañas del Panel Derecho ---
+const tabBtns = document.querySelectorAll('.tab-btn');
+const tabContents = document.querySelectorAll('.tab-content');
+
+tabBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    tabBtns.forEach(b => b.classList.remove('active'));
+    tabContents.forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    const targetId = btn.dataset.tab;
+    const targetContent = document.getElementById(targetId);
+    if (targetContent) targetContent.classList.add('active');
+  });
 });
 
 function renderLayerList() {
@@ -1399,22 +1438,38 @@ wrap.addEventListener('pointerdown', (e) => {
   if (q !== activeQuadrant) setActiveQuadrant(q);
 }, { capture: true });
 
-// --- Botonera de modos (mover / rotar / escalar / esculpir) ---
+// --- Botonera de modos (mover / rotar / escalar / esculpir / pelo) ---
 const modeButtons = document.querySelectorAll('.tbtn[data-mode]');
+const defaultToolOptions = document.getElementById('defaultToolOptions');
+const statusInfo = document.getElementById('statusInfo');
+const MODE_NAMES = {
+  translate: 'Mover (G)',
+  rotate: 'Rotar (R)',
+  scale: 'Escalar (S)',
+  sculpt: 'Esculpir (Pincel)',
+  hair: 'Dibujar Pelo'
+};
+
 function syncCanvasTop() {
-  wrap.style.top = toolbar.offsetHeight + 'px';
   handleResize();
 }
+
 function setMode(mode) {
   toolMode = mode;
   modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-  if (mode === 'sculpt' || mode === 'hair') {
-    // ninguno de los dos usa el gizmo de mover/rotar/escalar -- Esculpir
-    // deforma con el dedo, Pelo dibuja con el dedo.
+  if (statusInfo) statusInfo.textContent = `Editor 3D - Modo ${MODE_NAMES[mode] || mode}`;
+
+  if (mode === 'sculpt') {
     transform.detach();
-    brushRow.style.display = mode === 'sculpt' ? 'flex' : 'none';
+    brushRow.style.display = 'flex';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'none';
+  } else if (mode === 'hair') {
+    transform.detach();
+    brushRow.style.display = 'none';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
   } else {
     brushRow.style.display = 'none';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
     transform.setMode(mode);
     if (selectedId != null) {
       const entry = sceneObjects.get(selectedId);
