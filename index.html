@@ -372,12 +372,16 @@
     .dropdown:focus-within .dropdown-content { display: flex; flex-direction: column; }
 
     /* Header: se esconde el nombre de la app y se achican los botones de
-       menu para que entren en una sola fila angosta; si aun asi no entra
-       todo, se puede deslizar el dedo en vez de que se corte. */
+       menu para que entren en una sola fila angosta. OJO: header-left NO
+       puede tener overflow-x:auto -- el menu desplegable "cuelga" hacia
+       abajo desde aca mismo, y poner scroll horizontal hace que el
+       navegador tambien recorte verticalmente (no se puede tener una cosa
+       sin la otra), lo que dejaba el menu invisible aunque el boton
+       respondiera al toque (se veia resaltado pero sin opciones abajo).
+       En vez de scroll, todo tiene que entrar achicando los botones. */
     .brand span.brand-text { display: none; }
-    .header-left { overflow-x: auto; scrollbar-width: none; flex: 1 1 auto; min-width: 0; }
-    .header-left::-webkit-scrollbar { display: none; }
-    .dropbtn { padding: 6px 7px; font-size: 11px; }
+    .header-left { flex: 1 1 auto; min-width: 0; }
+    .dropbtn { padding: 6px 6px; font-size: 11px; }
     .header-right { flex: 0 0 auto; }
 
     /* Barra de opciones del modo activo: el texto "Modo Transformacion"
