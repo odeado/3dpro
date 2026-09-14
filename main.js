@@ -408,26 +408,26 @@ function cloneObjectSymmetry(id) {
   };
   if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
 
-  // 1. Crear el objeto espejo
+  // 1. Crear el objeto espejo (con escala positiva y material DoubleSide)
   const mirror = buildObject(src.kind, colorHex, extraOpts);
-  // El espejo empieza en posicion local cero — el Nulo determina donde va
   mirror.node.position.set(0, 0, 0);
-  mirror.node.rotation.copy(src.mesh.rotation);
-  mirror.node.rotation.y = -src.mesh.rotation.y;
+  mirror.node.rotation.set(src.mesh.rotation.x, -src.mesh.rotation.y, -src.mesh.rotation.z);
   mirror.node.scale.copy(src.mesh.scale);
-  // Escala negativa en X = efecto espejo sin duplicar geometría
-  mirror.node.scale.x = -Math.abs(src.mesh.scale.x);
+  if (mirror.node.material) {
+    mirror.node.material.side = THREE.DoubleSide;
+    mirror.node.material.opacity = src.mesh.material ? src.mesh.material.opacity : 1.0;
+    mirror.node.material.transparent = (src.mesh.material && src.mesh.material.opacity < 1.0);
+  }
 
   let copiedSculpt = false;
-  if (src.kind !== 'hair') {
-    copiedSculpt = copySculptIfAny(src, mirror.node);
-    if (copiedSculpt && mirror.node.geometry && mirror.node.geometry.attributes.position) {
-      const posAttr = mirror.node.geometry.attributes.position;
-      for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
-      posAttr.needsUpdate = true;
-      mirror.node.geometry.computeVertexNormals();
-      mirror.node.geometry.computeBoundingSphere();
-    }
+  if (src.kind !== 'hair' && mirror.node.geometry && src.mesh.geometry) {
+    mirror.node.geometry = src.mesh.geometry.clone();
+    const posAttr = mirror.node.geometry.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
+    posAttr.needsUpdate = true;
+    mirror.node.geometry.computeVertexNormals();
+    mirror.node.geometry.computeBoundingSphere();
+    copiedSculpt = !!src.sculpted;
   }
 
   // 2. Crear el Nulo contenedor (Simetría)
@@ -678,6 +678,8 @@ function updateTransformInputs() {
   inp.addEventListener('change', () => pushHistory());
 });
 
+const resizeAnchorSelect = document.getElementById('resizeAnchorSelect');
+
 [sizeX, sizeY, sizeZ].forEach((inp, idx) => {
   if (!inp) return;
   const axes = ['x', 'y', 'z'];
@@ -694,13 +696,33 @@ function updateTransformInputs() {
         Math.max(0.1, bb.max.y - bb.min.y),
         Math.max(0.1, bb.max.z - bb.min.z)
       ];
-      entry.mesh.scale[axes[idx]] = val / baseSizes[idx];
+      
+      const anchor = resizeAnchorSelect ? resizeAnchorSelect.value : 'min';
+      const oldScale = entry.mesh.scale[axes[idx]];
+      const oldSize = baseSizes[idx] * Math.abs(oldScale);
+      const newScale = val / baseSizes[idx];
+      const delta = (val - oldSize);
+
+      if (anchor === 'min') {
+        entry.mesh.position[axes[idx]] += delta / 2;
+      } else if (anchor === 'max') {
+        entry.mesh.position[axes[idx]] -= delta / 2;
+      }
+      entry.mesh.scale[axes[idx]] = newScale;
+
+      if (snapEnabled) {
+        applyLiveFurnitureSnap(selectedId);
+      }
+      updateTransformInputs();
     }
   });
   inp.addEventListener('change', () => pushHistory());
 });
 
 transform.addEventListener('objectChange', () => {
+  if (snapEnabled && selectedId != null) {
+    applyLiveFurnitureSnap(selectedId);
+  }
   updateTransformInputs();
 });
 
@@ -821,10 +843,16 @@ propsMetalness.addEventListener('change', () => { pushHistory(); });
 propsOpacity.addEventListener('input', () => {
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
-    if (entry && entry.mesh.material) {
+    if (entry && entry.mesh) {
       const val = parseFloat(propsOpacity.value);
-      entry.mesh.material.opacity = val;
-      entry.mesh.material.transparent = val < 1.0;
+      entry.mesh.traverse(child => {
+        if (child.material) {
+          child.material.opacity = val;
+          child.material.transparent = val < 1.0;
+          child.material.depthWrite = true;
+          child.material.needsUpdate = true;
+        }
+      });
     }
   }
 });
@@ -861,6 +889,166 @@ alignGroundBtn.addEventListener('click', () => {
 
 focusCamBtn.addEventListener('click', focusCameraOnSelection);
 
+// --- Guías Visuales de Contacto Magnético (Imán Celeste #00e5ff) ---
+const snapGuideGeo = new THREE.BoxGeometry(1, 1, 1);
+const snapGuideMat = new THREE.MeshBasicMaterial({
+  color: 0x00e5ff,
+  wireframe: true,
+  transparent: true,
+  opacity: 0.95,
+  depthTest: false
+});
+const snapGuideMesh = new THREE.Mesh(snapGuideGeo, snapGuideMat);
+snapGuideMesh.visible = false;
+snapGuideMesh.renderOrder = 999;
+scene.add(snapGuideMesh);
+
+const snapPlaneGeo = new THREE.PlaneGeometry(1, 1);
+const snapPlaneMat = new THREE.MeshBasicMaterial({
+  color: 0x00e5ff,
+  transparent: true,
+  opacity: 0.45,
+  side: THREE.DoubleSide,
+  depthTest: false
+});
+const snapPlaneMesh = new THREE.Mesh(snapPlaneGeo, snapPlaneMat);
+snapPlaneMesh.visible = false;
+snapPlaneMesh.renderOrder = 998;
+scene.add(snapPlaneMesh);
+
+function showSnapGuide(contactBox) {
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  contactBox.getCenter(center);
+  contactBox.getSize(size);
+
+  snapGuideMesh.position.copy(center);
+  snapGuideMesh.scale.set(Math.max(1, size.x), Math.max(1, size.y), Math.max(1, size.z));
+  snapGuideMesh.visible = true;
+
+  snapPlaneMesh.position.copy(center);
+  snapPlaneMesh.scale.set(Math.max(1, size.x || size.z), Math.max(1, size.y || size.z));
+  snapPlaneMesh.visible = true;
+}
+
+function hideSnapGuides() {
+  if (snapGuideMesh) snapGuideMesh.visible = false;
+  if (snapPlaneMesh) snapPlaneMesh.visible = false;
+}
+
+function applyLiveFurnitureSnap(id) {
+  const entry = sceneObjects.get(id);
+  if (!entry || entry.kind === 'null') {
+    hideSnapGuides();
+    return;
+  }
+
+  const snapDist = snapGridStep || 10;
+  const boxA = new THREE.Box3().setFromObject(entry.mesh);
+  let snapped = false;
+  let snapContactBox = null;
+
+  // 1. Snap al suelo (Y = 0)
+  if (Math.abs(boxA.min.y) <= snapDist) {
+    const diff = boxA.min.y;
+    entry.mesh.position.y -= diff;
+    boxA.min.y -= diff;
+    boxA.max.y -= diff;
+    snapped = true;
+    snapContactBox = new THREE.Box3(
+      new THREE.Vector3(boxA.min.x, -0.5, boxA.min.z),
+      new THREE.Vector3(boxA.max.x, 0.5, boxA.max.z)
+    );
+  }
+
+  // 2. Snap magnético de caras y esquinas a otros objetos vecinos
+  sceneObjects.forEach((other, otherId) => {
+    if (otherId === id || other.kind === 'null' || !other.visible) return;
+    if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
+
+    const boxB = new THREE.Box3().setFromObject(other.mesh);
+
+    const overlapX = (boxA.min.x < boxB.max.x + snapDist) && (boxA.max.x > boxB.min.x - snapDist);
+    const overlapY = (boxA.min.y < boxB.max.y + snapDist) && (boxA.max.y > boxB.min.y - snapDist);
+    const overlapZ = (boxA.min.z < boxB.max.z + snapDist) && (boxA.max.z > boxB.min.z - snapDist);
+
+    // X Face contact (Right face of A touches Left face of B or vice versa)
+    if (overlapY && overlapZ) {
+      if (Math.abs(boxA.max.x - boxB.min.x) <= snapDist) {
+        const diff = boxA.max.x - boxB.min.x;
+        entry.mesh.position.x -= diff;
+        boxA.min.x -= diff; boxA.max.x -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(boxB.min.x - 0.5, Math.max(boxA.min.y, boxB.min.y), Math.max(boxA.min.z, boxB.min.z)),
+          new THREE.Vector3(boxB.min.x + 0.5, Math.min(boxA.max.y, boxB.max.y), Math.min(boxA.max.z, boxB.max.z))
+        );
+      } else if (Math.abs(boxA.min.x - boxB.max.x) <= snapDist) {
+        const diff = boxA.min.x - boxB.max.x;
+        entry.mesh.position.x -= diff;
+        boxA.min.x -= diff; boxA.max.x -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(boxB.max.x - 0.5, Math.max(boxA.min.y, boxB.min.y), Math.max(boxA.min.z, boxB.min.z)),
+          new THREE.Vector3(boxB.max.x + 0.5, Math.min(boxA.max.y, boxB.max.y), Math.min(boxA.max.z, boxB.max.z))
+        );
+      }
+    }
+
+    // Y Face contact (Bottom of A sits on Top of B or vice versa)
+    if (overlapX && overlapZ) {
+      if (Math.abs(boxA.min.y - boxB.max.y) <= snapDist) {
+        const diff = boxA.min.y - boxB.max.y;
+        entry.mesh.position.y -= diff;
+        boxA.min.y -= diff; boxA.max.y -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(Math.max(boxA.min.x, boxB.min.x), boxB.max.y - 0.5, Math.max(boxA.min.z, boxB.min.z)),
+          new THREE.Vector3(Math.min(boxA.max.x, boxB.max.x), boxB.max.y + 0.5, Math.min(boxA.max.z, boxB.max.z))
+        );
+      } else if (Math.abs(boxA.max.y - boxB.min.y) <= snapDist) {
+        const diff = boxA.max.y - boxB.min.y;
+        entry.mesh.position.y -= diff;
+        boxA.min.y -= diff; boxA.max.y -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(Math.max(boxA.min.x, boxB.min.x), boxB.min.y - 0.5, Math.max(boxA.min.z, boxB.min.z)),
+          new THREE.Vector3(Math.min(boxA.max.x, boxB.max.x), boxB.min.y + 0.5, Math.min(boxA.max.z, boxB.max.z))
+        );
+      }
+    }
+
+    // Z Face contact (Front face touches Back face)
+    if (overlapX && overlapY) {
+      if (Math.abs(boxA.max.z - boxB.min.z) <= snapDist) {
+        const diff = boxA.max.z - boxB.min.z;
+        entry.mesh.position.z -= diff;
+        boxA.min.z -= diff; boxA.max.z -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(Math.max(boxA.min.x, boxB.min.x), Math.max(boxA.min.y, boxB.min.y), boxB.min.z - 0.5),
+          new THREE.Vector3(Math.min(boxA.max.x, boxB.max.x), Math.min(boxA.max.y, boxB.max.y), boxB.min.z + 0.5)
+        );
+      } else if (Math.abs(boxA.min.z - boxB.max.z) <= snapDist) {
+        const diff = boxA.min.z - boxB.max.z;
+        entry.mesh.position.z -= diff;
+        boxA.min.z -= diff; boxA.max.z -= diff;
+        snapped = true;
+        snapContactBox = new THREE.Box3(
+          new THREE.Vector3(Math.max(boxA.min.x, boxB.min.x), Math.max(boxA.min.y, boxB.min.y), boxB.max.z - 0.5),
+          new THREE.Vector3(Math.min(boxA.max.x, boxB.max.x), Math.min(boxA.max.y, boxB.max.y), boxB.min.z + 0.5)
+        );
+      }
+    }
+  });
+
+  if (snapped && snapContactBox) {
+    showSnapGuide(snapContactBox);
+  } else {
+    hideSnapGuides();
+  }
+}
+
 // --- Modo Imán (Snapping) ---
 let snapEnabled = false;
 let snapGridStep = 10;
@@ -874,6 +1062,7 @@ function updateSnapping() {
   } else {
     transform.setTranslationSnap(null);
     transform.setRotationSnap(null);
+    hideSnapGuides();
   }
 }
 
@@ -881,7 +1070,7 @@ if (snapToggleBtn) {
   snapToggleBtn.addEventListener('click', () => {
     snapEnabled = !snapEnabled;
     snapToggleBtn.textContent = snapEnabled ? '🧲 Imán: ON' : '🧲 Imán: OFF';
-    snapToggleBtn.classList.toggle('active', snapEnabled);
+    snapToggleBtn.classList.toggle('active-cyan', snapEnabled);
     updateSnapping();
   });
 }
@@ -893,53 +1082,13 @@ if (snapGridSelect) {
   });
 }
 
-function applyObjectSnap(id) {
-  const entry = sceneObjects.get(id);
-  if (!entry || entry.kind === 'null') return;
-
-  const snapDist = snapGridStep || 10;
-  const boxA = new THREE.Box3().setFromObject(entry.mesh);
-
-  // Snap al suelo (Y = 0)
-  if (Math.abs(boxA.min.y) <= snapDist) {
-    entry.mesh.position.y -= boxA.min.y;
-  }
-
-  // Snap magnético cara con cara entre objetos vecinos
-  sceneObjects.forEach((other, otherId) => {
-    if (otherId === id || other.kind === 'null' || !other.visible) return;
-    if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
-
-    const boxB = new THREE.Box3().setFromObject(other.mesh);
-
-    if (Math.abs(boxA.max.x - boxB.min.x) <= snapDist) {
-      entry.mesh.position.x -= (boxA.max.x - boxB.min.x);
-    } else if (Math.abs(boxA.min.x - boxB.max.x) <= snapDist) {
-      entry.mesh.position.x -= (boxA.min.x - boxB.max.x);
-    }
-
-    if (Math.abs(boxA.min.y - boxB.max.y) <= snapDist) {
-      entry.mesh.position.y -= (boxA.min.y - boxB.max.y);
-    } else if (Math.abs(boxA.max.y - boxB.min.y) <= snapDist) {
-      entry.mesh.position.y -= (boxA.max.y - boxB.min.y);
-    }
-
-    if (Math.abs(boxA.max.z - boxB.min.z) <= snapDist) {
-      entry.mesh.position.z -= (boxA.max.z - boxB.min.z);
-    } else if (Math.abs(boxA.min.z - boxB.max.z) <= snapDist) {
-      entry.mesh.position.z -= (boxA.min.z - boxB.max.z);
-    }
-  });
-
-  updateTransformInputs();
-}
-
 transform.addEventListener('dragging-changed', (e) => {
   orbit.enabled = !e.value;
   if (!e.value) {
     if (snapEnabled && selectedId != null) {
-      applyObjectSnap(selectedId);
+      applyLiveFurnitureSnap(selectedId);
     }
+    hideSnapGuides();
     pushHistory();
   }
 });
@@ -1163,15 +1312,30 @@ shadowToggle.addEventListener('change', () => {
   renderer.shadowMap.enabled = shadowToggle.checked;
 });
 
+function updateCanvasDimensions() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  if (w <= 0 || h <= 0) return;
+  renderer.setSize(w, h);
+  perspCam.aspect = w / h;
+  perspCam.updateProjectionMatrix();
+  if (typeof syncQuadrantCameras === 'function' && fourViewMode) {
+    syncQuadrantCameras();
+  }
+}
+
+// Observador automático de tamaño para expandir/contraer el canvas 3D fluidamente
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => updateCanvasDimensions());
+  ro.observe(wrap);
+}
+window.addEventListener('resize', updateCanvasDimensions);
+
 toggleSidePanelBtn.addEventListener('click', () => {
   const collapsed = rightPanel.classList.toggle('collapsed');
   document.body.classList.toggle('side-collapsed', collapsed);
   toggleSidePanelBtn.textContent = collapsed ? '◀' : '▶';
-  // Redimensionar canvas al cambiar panel
-  const w = wrap.clientWidth, h = wrap.clientHeight;
-  renderer.setSize(w, h);
-  perspCam.aspect = w / h;
-  perspCam.updateProjectionMatrix();
+  updateCanvasDimensions();
+  setTimeout(updateCanvasDimensions, 220);
 });
 
 // --- Lógica de Menús Desplegables Header ---
@@ -2360,18 +2524,23 @@ function animate() {
       srcEntry.mesh.position.y,
       srcEntry.mesh.position.z
     );
-    // Mirror rotation: flip Y axis
+    // Mirror rotation: flip Y and Z
     entry.mesh.rotation.set(
       srcEntry.mesh.rotation.x,
       -srcEntry.mesh.rotation.y,
-      srcEntry.mesh.rotation.z
+      -srcEntry.mesh.rotation.z
     );
-    // Mirror scale: flip X
+    // Mirror scale: positive scale (no negative scale culling)
     entry.mesh.scale.set(
-      -Math.abs(srcEntry.mesh.scale.x),
+      srcEntry.mesh.scale.x,
       srcEntry.mesh.scale.y,
       srcEntry.mesh.scale.z
     );
+    if (srcEntry.mesh.material && entry.mesh.material) {
+      entry.mesh.material.opacity = srcEntry.mesh.material.opacity;
+      entry.mesh.material.transparent = srcEntry.mesh.material.opacity < 1.0;
+      entry.mesh.material.side = THREE.DoubleSide;
+    }
   });
 
   if (fourViewMode) {

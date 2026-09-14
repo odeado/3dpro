@@ -20,11 +20,21 @@
     --header-h: 36px;
     --context-h: 36px;
     --left-w: 48px;
-    --right-w: 250px;
+    --right-w: 290px;
     --status-h: 24px;
   }
 
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg-main); font-family: system-ui, -apple-system, sans-serif; color: #abb2bf; user-select: none; }
+
+  /* Number inputs: remove spinner arrows to allow large 4-5 digit numbers cleanly */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
 
   /* 1. Header Bar */
   #mainHeader {
@@ -88,6 +98,11 @@
     background: var(--accent); color: var(--fg-active);
     border-color: var(--accent); font-weight: bold;
   }
+  .context-btn.active-cyan {
+    background: #0077b6 !important; color: #ffffff !important;
+    border-color: #00d2ff !important; font-weight: bold;
+    box-shadow: 0 0 10px rgba(0, 210, 255, 0.45) !important;
+  }
   .context-slider { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #abb2bf; }
   .context-slider input[type="range"] { width: 70px; cursor: pointer; accent-color: var(--accent); }
 
@@ -137,9 +152,9 @@
     flex-direction: column; z-index: 80; transition: transform 0.2s ease;
     box-sizing: border-box;
   }
-  #rightPanel.collapsed { transform: translateX(100%); }
-  body.side-collapsed #canvasWrap { right: 0; }
-  body.side-collapsed #toggleSidePanelBtn { right: 8px; }
+  #rightPanel.collapsed { transform: translateX(100%); pointer-events: none; }
+  body.side-collapsed #canvasWrap { right: 0 !important; }
+  body.side-collapsed #toggleSidePanelBtn { right: 8px !important; }
 
   .panel-tabs {
     display: flex; background: #181a1f; border-bottom: 1px solid var(--border-color);
@@ -427,11 +442,18 @@
             </div>
           </div>
           <div class="prop-row" id="dimRow">
-            <label>Dimensiones / Tamaño (mm)</label>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+              <label>Dimensiones (mm)</label>
+              <select id="resizeAnchorSelect" class="axis-input" style="width:auto; background:#181a1f; padding:2px 6px; border:1px solid var(--border-color); border-radius:3px; font-size:10px; color:#56b6c2;">
+                <option value="min">📌 Anclar Base / Esquina (Fijo)</option>
+                <option value="center">📌 Anclar Centro</option>
+                <option value="max">📌 Anclar Tope / Esquina Máx.</option>
+              </select>
+            </div>
             <div class="axis-row">
-              <div class="axis-input-wrap"><span class="axis-tag tag-x">An</span><input id="sizeX" class="axis-input" type="number" step="1" min="1"></div>
-              <div class="axis-input-wrap"><span class="axis-tag tag-y">Al</span><input id="sizeY" class="axis-input" type="number" step="1" min="1"></div>
-              <div class="axis-input-wrap"><span class="axis-tag tag-z">Pr</span><input id="sizeZ" class="axis-input" type="number" step="1" min="1"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-x">An</span><input id="sizeX" class="axis-input" type="number" step="1" min="1" placeholder="Ancho"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-y">Al</span><input id="sizeY" class="axis-input" type="number" step="1" min="1" placeholder="Alto"></div>
+              <div class="axis-input-wrap"><span class="axis-tag tag-z">Pr</span><input id="sizeZ" class="axis-input" type="number" step="1" min="1" placeholder="Prof."></div>
             </div>
           </div>
         </div>
