@@ -408,25 +408,37 @@ function cloneObjectSymmetry(id) {
   };
   if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
 
-  // 1. Crear el objeto espejo (con escala positiva y material DoubleSide)
+  // 1. Crear el objeto espejo con material idéntico
   const mirror = buildObject(src.kind, colorHex, extraOpts);
   mirror.node.position.set(0, 0, 0);
   mirror.node.rotation.set(src.mesh.rotation.x, -src.mesh.rotation.y, -src.mesh.rotation.z);
   mirror.node.scale.copy(src.mesh.scale);
-  if (mirror.node.material) {
-    mirror.node.material.side = THREE.DoubleSide;
-    mirror.node.material.opacity = src.mesh.material ? src.mesh.material.opacity : 1.0;
-    mirror.node.material.transparent = (src.mesh.material && src.mesh.material.opacity < 1.0);
+  if (mirror.node.material && src.mesh.material) {
+    mirror.node.material = src.mesh.material.clone();
+    mirror.node.material.side = THREE.FrontSide;
+    mirror.node.material.needsUpdate = true;
   }
 
   let copiedSculpt = false;
   if (src.kind !== 'hair' && mirror.node.geometry && src.mesh.geometry) {
     mirror.node.geometry = src.mesh.geometry.clone();
-    const posAttr = mirror.node.geometry.attributes.position;
+    const geo = mirror.node.geometry;
+    const posAttr = geo.attributes.position;
     for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
+    
+    // Invertir orden de vértices en los triángulos (winding) para que las normales apunten hacia afuera
+    if (geo.index) {
+      const idxArr = geo.index.array;
+      for (let i = 0; i < idxArr.length; i += 3) {
+        const tmp = idxArr[i + 1];
+        idxArr[i + 1] = idxArr[i + 2];
+        idxArr[i + 2] = tmp;
+      }
+      geo.index.needsUpdate = true;
+    }
     posAttr.needsUpdate = true;
-    mirror.node.geometry.computeVertexNormals();
-    mirror.node.geometry.computeBoundingSphere();
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
     copiedSculpt = !!src.sculpted;
   }
 
@@ -961,8 +973,81 @@ function applyLiveFurnitureSnap(id) {
     );
   }
 
-  // 2. Snap magnético de caras y esquinas a otros objetos vecinos
-  sceneObjects.forEach((other, otherId) => {
+  if (toolMode === 'scale') {
+    // HARD LOCK SNAPPING EN MODO ESCALAR (Para muebles y tablas):
+    sceneObjects.forEach((other, otherId) => {
+      if (otherId === id || other.kind === 'null' || !other.visible) return;
+      if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
+
+      const boxB = new THREE.Box3().setFromObject(other.mesh);
+      const bb = entry.mesh.geometry?.boundingBox || new THREE.Box3().setFromBufferAttribute(entry.mesh.geometry.attributes.position);
+      const baseW = Math.max(0.1, bb.max.x - bb.min.x);
+      const baseH = Math.max(0.1, bb.max.y - bb.min.y);
+      const baseD = Math.max(0.1, bb.max.z - bb.min.z);
+
+      // Snap X (borde derecho o izquierdo al ras del otro objeto)
+      [boxB.min.x, boxB.max.x].forEach(targetX => {
+        if (Math.abs(boxA.max.x - targetX) <= snapDist) {
+          const newW = targetX - boxA.min.x;
+          if (newW > 1) {
+            entry.mesh.scale.x = newW / baseW;
+            entry.mesh.position.x = boxA.min.x + newW / 2;
+            snapped = true;
+            snapContactBox = new THREE.Box3(
+              new THREE.Vector3(targetX - 0.5, boxA.min.y, boxA.min.z),
+              new THREE.Vector3(targetX + 0.5, boxA.max.y, boxA.max.z)
+            );
+          }
+        } else if (Math.abs(boxA.min.x - targetX) <= snapDist) {
+          const newW = boxA.max.x - targetX;
+          if (newW > 1) {
+            entry.mesh.scale.x = newW / baseW;
+            entry.mesh.position.x = targetX + newW / 2;
+            snapped = true;
+            snapContactBox = new THREE.Box3(
+              new THREE.Vector3(targetX - 0.5, boxA.min.y, boxA.min.z),
+              new THREE.Vector3(targetX + 0.5, boxA.max.y, boxA.max.z)
+            );
+          }
+        }
+      });
+
+      // Snap Y (altura al ras del otro mueble o al suelo)
+      [0, boxB.min.y, boxB.max.y].forEach(targetY => {
+        if (Math.abs(boxA.max.y - targetY) <= snapDist) {
+          const newH = targetY - boxA.min.y;
+          if (newH > 1) {
+            entry.mesh.scale.y = newH / baseH;
+            entry.mesh.position.y = boxA.min.y + newH / 2;
+            snapped = true;
+            snapContactBox = new THREE.Box3(
+              new THREE.Vector3(boxA.min.x, targetY - 0.5, boxA.min.z),
+              new THREE.Vector3(boxA.max.x, targetY + 0.5, boxA.max.z)
+            );
+          }
+        }
+      });
+
+      // Snap Z (profundidad al ras de la otra tabla)
+      [boxB.min.z, boxB.max.z].forEach(targetZ => {
+        if (Math.abs(boxA.max.z - targetZ) <= snapDist) {
+          const newD = targetZ - boxA.min.z;
+          if (newD > 1) {
+            entry.mesh.scale.z = newD / baseD;
+            entry.mesh.position.z = boxA.min.z + newD / 2;
+            snapped = true;
+            snapContactBox = new THREE.Box3(
+              new THREE.Vector3(boxA.min.x, boxA.min.y, targetZ - 0.5),
+              new THREE.Vector3(boxA.max.x, boxA.max.y, targetZ + 0.5)
+            );
+          }
+        }
+      });
+    });
+
+  } else {
+    // 2. Snap magnético de caras y esquinas a otros objetos vecinos
+    sceneObjects.forEach((other, otherId) => {
     if (otherId === id || other.kind === 'null' || !other.visible) return;
     if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
 
@@ -1041,6 +1126,7 @@ function applyLiveFurnitureSnap(id) {
       }
     }
   });
+  }
 
   if (snapped && snapContactBox) {
     showSnapGuide(snapContactBox);
