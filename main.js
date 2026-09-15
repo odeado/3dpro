@@ -1242,6 +1242,11 @@ let dragStartSize = 100;
 let dragBaseDimensions = { w: 100, h: 100, d: 100 };
 let dragScreenDir = new THREE.Vector2();
 let dragMmPerPixel = 1;
+// Cara OPUESTA a la que se esta arrastrando (ver comentario en
+// startHandleDrag): es la que se mantiene fija en su lugar mientras se
+// redimensiona, sin importar donde este puesto el pivot en ese momento.
+let dragAnchorLocal = 0;
+let dragAnchorPos = 0;
 
 function startHandleDrag(handleMesh, clientX, clientY) {
   if (selectedId == null) return;
@@ -1272,6 +1277,22 @@ function startHandleDrag(handleMesh, clientX, clientY) {
   const axis = activeDragHandle.axis;
   const baseSize = axis === 'x' ? dragBaseDimensions.w : (axis === 'y' ? dragBaseDimensions.h : dragBaseDimensions.d);
   dragStartSize = baseSize * Math.abs(dragStartScale[axis]);
+
+  // Cada bolita tiene que redimensionar HACIA SU LADO, dejando fija la cara
+  // OPUESTA -- sin importar donde este puesto el pivot actual (Base/Centro/
+  // Izq/Der/etc. en "Mover Eje/Pivote"). Antes se dejaba fijo el PIVOT en
+  // vez de la cara opuesta: con pivot Centro eso hacia que arrastrar
+  // cualquier bolita estirara la figura de los DOS lados a la vez (ya que
+  // ambas caras estan a la misma distancia del centro); con el pivot en un
+  // costado, la bolita de ESE costado no hacia nada notorio (esa cara
+  // coincide con el pivot, que nunca se mueve) y la bolita del otro
+  // extremo estiraba raro. Fijar la cara opuesta a la que se arrastra
+  // (en vez de fijar el pivot) es lo que se espera de un tirador de
+  // redimensionar en cualquier programa de diseño, y funciona igual sin
+  // importar el pivot elegido.
+  const dir = activeDragHandle.dir;
+  dragAnchorLocal = (dir === 1) ? bb.min[axis] : bb.max[axis];
+  dragAnchorPos = dragStartPos[axis] + dragAnchorLocal * dragStartScale[axis];
 
   // Vector unitario 3D del tirador en coordenadas del mundo
   const handleDirWorld = new THREE.Vector3();
@@ -1321,21 +1342,21 @@ function onHandleDrag(clientX, clientY) {
                  : axis === 'y' ? dragBaseDimensions.h
                  : dragBaseDimensions.d;
 
-  // ── Lógica de anclaje en el PIVOT ────────────────────────────────────────
-  // El pivot (origin) del mesh es el punto fijo. En local-space, el pivot
-  // siempre está en (0,0,0) del mesh. La geometría puede estar desplazada.
-  // bb.min/max son los extremos en local-space.
+  // ── Lógica de anclaje en la CARA OPUESTA ─────────────────────────────────
+  // dragAnchorLocal/dragAnchorPos (calculados una vez en startHandleDrag)
+  // son la cara de ENFRENTE de la que se está arrastrando -- es la que se
+  // mantiene fija en su lugar mientras se redimensiona, sin importar dónde
+  // esté puesto el pivot actual. Ver el comentario largo en startHandleDrag.
   const bb = entry.mesh.geometry.boundingBox;
-  const pivotToMin = bb.min[axis];   // distancia del pivot al borde mínimo (negativa si pivot a la derecha)
-  const pivotToMax = bb.max[axis];   // distancia del pivot al borde máximo
 
   // Escala nueva
   const newScale = newSize / baseSize;
   entry.mesh.scale[axis] = newScale;
 
-  // La posición NO cambia: el pivot se queda en su lugar.
-  // El objeto crece/decrece alrededor del pivot según la geometría.
-  entry.mesh.position[axis] = dragStartPos[axis];
+  // La cara opuesta (el ancla) es la que NO se mueve -- se recalcula la
+  // posición para que, con la escala nueva, esa cara quede exactamente
+  // donde estaba antes de empezar a arrastrar.
+  entry.mesh.position[axis] = dragAnchorPos - dragAnchorLocal * newScale;
 
   // Borde activo en world-space (para HUD y snap)
   entry.mesh.updateMatrixWorld(true);
@@ -1362,15 +1383,17 @@ function onHandleDrag(clientX, clientY) {
   let isTope = false;
   if (nearestTargetEdge !== null && minRemDist <= snapDist) {
     isTope = true;
-    // Calcular qué escala hace que el borde llegue exactamente al target
-    // borde_world = pivot_world + sign * localEdgeDist * scale
-    const pivotWorld = dragStartPos[axis];
-    const localEdgeDist = dir === 1 ? pivotToMax : -pivotToMin; // siempre positivo
-    if (Math.abs(localEdgeDist) > 0.001) {
-      const requiredScale = (dir * (nearestTargetEdge - pivotWorld)) / localEdgeDist;
+    // Igual que arriba, pero calculando qué escala hace que el borde
+    // arrastrado llegue EXACTO al borde vecino, mantiniendo la cara
+    // opuesta (el ancla) fija: borde_arrastrado = ancla_pos + dir *
+    // baseSize * scale (la distancia entre ambas caras en espacio local
+    // es siempre baseSize, sea cual sea el lado que se esté arrastrando).
+    if (baseSize > 0.001) {
+      const requiredScale = (dir * (nearestTargetEdge - dragAnchorPos)) / baseSize;
       if (requiredScale > 0.001) {
         newSize = requiredScale * baseSize;
         entry.mesh.scale[axis] = requiredScale;
+        entry.mesh.position[axis] = dragAnchorPos - dragAnchorLocal * requiredScale;
         entry.mesh.updateMatrixWorld(true);
       }
     }
@@ -1638,6 +1661,55 @@ const symAxisSelect = document.getElementById('symAxisSelect');
 const symOffsetInput = document.getElementById('symOffsetInput');
 const symBakeBtn = document.getElementById('symBakeBtn');
 
+// Convierte 'x'/'y'/'z' al indice 0/1/2 que usan .getX/.getY/.getZ, etc.
+function symAxisIndex(axis) {
+  return axis === 'y' ? 1 : (axis === 'z' ? 2 : 0);
+}
+
+// Vuelve a armar la geometria del espejo, invertida sobre el eje elegido en
+// symEntry.symAxis, a partir de la geometria ACTUAL de la figura original
+// (asi conserva cualquier esculpido que tenga el original, igual que al
+// crear la simetria por primera vez). Antes, "Eje de Espejo" solo guardaba
+// el valor elegido pero nunca volvia a armar el espejo -- por eso cambiar
+// de X a Y o Z no cambiaba nada en pantalla.
+function remirrorSymmetry(symEntry) {
+  const srcId = symEntry.symmetrySourceId;
+  const src = sceneObjects.get(srcId);
+  if (!src) return;
+  if (src.kind === 'hair') return; // el pelo no guarda los puntos del trazo por separado -- no se puede re-espejar sin volver a dibujar
+  let mirrorEntry = null;
+  sceneObjects.forEach(e => { if (e.parentId === symEntry.id && e.isMirrorOf === srcId) mirrorEntry = e; });
+  if (!mirrorEntry || !mirrorEntry.mesh.geometry || !src.mesh.geometry) return;
+
+  const ax = symAxisIndex(symEntry.symAxis);
+  const geo = src.mesh.geometry.clone();
+  const posAttr = geo.attributes.position;
+  for (let i = 0; i < posAttr.count; i++) {
+    if (ax === 0) posAttr.setX(i, -posAttr.getX(i));
+    else if (ax === 1) posAttr.setY(i, -posAttr.getY(i));
+    else posAttr.setZ(i, -posAttr.getZ(i));
+  }
+  // Invertir el orden de vertices en los triangulos (winding) para que las
+  // normales sigan apuntando hacia afuera -- espejar sobre CUALQUIER eje
+  // invierte la orientacion (handedness) del mismo modo, asi que el arreglo
+  // es el mismo sin importar cual eje se haya elegido.
+  if (geo.index) {
+    const idxArr = geo.index.array;
+    for (let i = 0; i < idxArr.length; i += 3) {
+      const tmp = idxArr[i + 1];
+      idxArr[i + 1] = idxArr[i + 2];
+      idxArr[i + 2] = tmp;
+    }
+    geo.index.needsUpdate = true;
+  }
+  posAttr.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  mirrorEntry.mesh.geometry.dispose();
+  mirrorEntry.mesh.geometry = geo;
+  mirrorEntry.sculpted = !!src.sculpted;
+}
+
 if (symAxisSelect) {
   symAxisSelect.addEventListener('change', () => {
     if (selectedId == null) return;
@@ -1645,6 +1717,12 @@ if (symAxisSelect) {
     const symEntry = (entry && entry.symmetrySourceId != null) ? entry : (entry?.parentId ? sceneObjects.get(entry.parentId) : null);
     if (symEntry && symEntry.symmetrySourceId != null) {
       symEntry.symAxis = symAxisSelect.value;
+      // Cambiar el eje no solo tiene que afectar hacia donde se mueve el
+      // espejo en vivo (eso ya lo lee animate() de symEntry.symAxis) -- la
+      // FORMA del espejo tambien esta invertida sobre un eje especifico
+      // (se armo mirando el eje que estaba elegido en ese momento), asi que
+      // hay que rehacer esa geometria mirada desde el eje nuevo.
+      remirrorSymmetry(symEntry);
       pushHistory();
     }
   });
@@ -2761,11 +2839,19 @@ function syncSymmetryMirrorsFor(srcId) {
   if (!srcEntry || !srcEntry.mesh || !srcEntry.mesh.geometry) return;
   sceneObjects.forEach(e => {
     if (e.isMirrorOf === srcId && e.mesh && e.mesh.geometry) {
+      // Igual que en animate(): que eje espejar lo dice symAxis del Nulo de
+      // Simetria (padre de este espejo), no siempre X. El orden de los
+      // triangulos (winding) ya quedo arreglado una vez al crear/rearmar el
+      // espejo (remirrorSymmetry) y no cambia al esculpir, asi que aca solo
+      // hace falta invertir la componente del eje correcto por vertice.
+      const symEntry = e.parentId != null ? sceneObjects.get(e.parentId) : null;
+      const ax = symAxisIndex(symEntry ? symEntry.symAxis : 'x');
       const srcPos = srcEntry.mesh.geometry.attributes.position;
       const dstPos = e.mesh.geometry.attributes.position;
       if (srcPos && dstPos && srcPos.count === dstPos.count) {
         for (let i = 0; i < srcPos.count; i++) {
-          dstPos.setXYZ(i, -srcPos.getX(i), srcPos.getY(i), srcPos.getZ(i));
+          const vx = srcPos.getX(i), vy = srcPos.getY(i), vz = srcPos.getZ(i);
+          dstPos.setXYZ(i, ax === 0 ? -vx : vx, ax === 1 ? -vy : vy, ax === 2 ? -vz : vz);
         }
         dstPos.needsUpdate = true;
         e.mesh.geometry.computeVertexNormals();
@@ -3221,36 +3307,34 @@ window.addEventListener('resize', handleResize);
 // compartido -- no hay una copia independiente por camara. Su geometria de
 // verdad (la que se usa para detectar el arrastre, no solo como se dibuja)
 // se recalcula cada vez que se lo renderiza, segun la camara que tenga
-// asignada en ESE instante. Si se dibujara en las 4 vistas todas seguidas
-// (como se hacia antes), quedaria calibrado solo para la ULTIMA camara del
-// barrido -- por eso el arrastre solo funcionaba en el cuadrante que
-// justo quedaba al final ("Arriba"), y fallaba en cualquier otro (como
-// "Frente"). La solucion (probada con pruebas automaticas arrastrando el
-// gizmo en los 4 cuadrantes) es sacarlo de la escena mientras se dibujan
-// los otros tres, y devolverlo solo para el cuadrante ACTIVO -- asi su
-// geometria de arrastre nunca se calibra con una camara que no sea esa.
-// Como efecto secundario (bueno): el gizmo ahora se ve solo en el
-// cuadrante activo en vez de en los 4 mal calibrado, lo que de paso deja
-// mas claro en cual se esta trabajando.
+// asignada en ESE instante (`transform.camera`). El bug original (arreglado
+// antes) era que ese `transform.camera` se REASIGNABA a cada una de las 4
+// camaras por turno dentro de este mismo barrido de render -- asi que al
+// terminar el cuadro, siempre quedaba calibrado para la ULTIMA camara del
+// barrido fijo ('br' = "Arriba"), sin importar en que cuadrante estuviera
+// tocando el dedo. `setActiveQuadrant()` es el UNICO lugar que cambia
+// `transform.camera` ahora (ver esa funcion) -- por eso ya no hace falta
+// sacar el gizmo de la escena durante este barrido para evitar que se
+// recalibre mal: como `transform.camera` nunca se toca aca, se lo puede
+// dejar SIEMPRE en la escena y que las 4 camaras lo dibujen, sin volver a
+// romper el arrastre (que sigue funcionando solo en el cuadrante activo,
+// que es el unico al que _pan/viewport/transform.camera estan calibrados).
+// Antes (sept. 2026) el gizmo se sacaba de la escena en los otros 3
+// cuadrantes como forma de garantizar la calibracion -- pero eso lo hacia
+// "desaparecer" cada vez que se miraba un cuadrante que no fuera el activo,
+// que es justo lo que Andres reporto como molesto ("se sale", "no se ve en
+// todas las camaras a la vez"). Como la calibracion ya no depende de este
+// barrido, mostrarlo en los 4 a la vez es seguro.
 function renderFourView() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
   renderer.setScissorTest(true);
-  const helperWasIn = transformHelper.parent === scene;
-  if (helperWasIn) scene.remove(transformHelper);
   ['tl', 'tr', 'bl', 'br'].forEach(q => {
     const r = quadrantGLRect(q, w, h);
     const cam = GRID_CAMS[q];
     renderer.setViewport(r.x, r.y, r.w, r.h);
     renderer.setScissor(r.x, r.y, r.w, r.h);
-    const isActive = q === activeQuadrant;
-    if (isActive && helperWasIn) {
-      transform.camera = cam;
-      scene.add(transformHelper);
-    }
     renderer.render(scene, cam);
-    if (isActive && helperWasIn) scene.remove(transformHelper);
   });
-  if (helperWasIn) scene.add(transformHelper);
   renderer.setScissorTest(false);
   renderer.setViewport(0, 0, w, h);
 }
@@ -3278,18 +3362,28 @@ function animate() {
     if (!entry.isMirrorOf) return;
     const srcEntry = sceneObjects.get(entry.isMirrorOf);
     if (!srcEntry) return;
-    // Mirror position: flip X relative to parent (Null center)
-    entry.mesh.position.set(
-      -srcEntry.mesh.position.x,
-      srcEntry.mesh.position.y,
-      srcEntry.mesh.position.z
-    );
-    // Mirror rotation: flip Y and Z
-    entry.mesh.rotation.set(
-      srcEntry.mesh.rotation.x,
-      -srcEntry.mesh.rotation.y,
-      -srcEntry.mesh.rotation.z
-    );
+    // El Nulo de Simetria (padre de este espejo) guarda que eje usar
+    // (symAxis) y cuanta separacion extra del centro pedir (symOffset) --
+    // antes esto se leia en ningun lado y siempre se espejaba fijo sobre X
+    // sin separacion, por eso "Eje de Espejo" y "Separacion Centro" no
+    // hacian nada visible.
+    const symEntry = entry.parentId != null ? sceneObjects.get(entry.parentId) : null;
+    const ax = symAxisIndex(symEntry ? symEntry.symAxis : 'x');
+    const offset = (symEntry && symEntry.symOffset) ? symEntry.symOffset : 0;
+    // Mirror position: invertir SOLO el eje elegido, y sumarle la separacion
+    // pedida hacia el mismo lado en el que ya esta el original (o hacia +
+    // si el original esta justo en el centro, offset 0 en ese eje).
+    const srcP = [srcEntry.mesh.position.x, srcEntry.mesh.position.y, srcEntry.mesh.position.z];
+    const side = Math.sign(srcP[ax]) || 1;
+    const mirrorP = srcP.slice();
+    mirrorP[ax] = -srcP[ax] - side * offset;
+    entry.mesh.position.set(mirrorP[0], mirrorP[1], mirrorP[2]);
+    // Mirror rotation: negar los DOS componentes que no son el eje elegido
+    // (el mismo truco que antes, pero generalizado: espejar sobre X negaba
+    // Y/Z, espejar sobre Y negaria X/Z, espejar sobre Z negaria X/Y).
+    const srcR = [srcEntry.mesh.rotation.x, srcEntry.mesh.rotation.y, srcEntry.mesh.rotation.z];
+    const mirrorR = srcR.map((v, i) => (i === ax ? v : -v));
+    entry.mesh.rotation.set(mirrorR[0], mirrorR[1], mirrorR[2]);
     // Mirror scale: positive scale (no negative scale culling)
     entry.mesh.scale.set(
       srcEntry.mesh.scale.x,
