@@ -4,11 +4,15 @@
 // vieja se quedara pegada la primera vez). Cada vez que se cambian estos
 // archivos hay que subir el numero de CACHE_NAME una vez mas, asi el
 // activate() de abajo tira a la basura la cache anterior.
-const CACHE_NAME = 'editor3d-v17';
+const CACHE_NAME = 'editor3d-v18';
 const ASSETS = [
   './', './index.html', './main.js',
   './vendor/three.module.js', './vendor/three.core.js',
   './vendor/three-addons/OrbitControls.js', './vendor/three-addons/TransformControls.js',
+  './vendor/three-addons/loaders/FontLoader.js', './vendor/three-addons/geometries/TextGeometry.js',
+  './vendor/fonts/helvetiker_regular.typeface.json', './vendor/fonts/helvetiker_bold.typeface.json',
+  './vendor/fonts/optimer_regular.typeface.json', './vendor/fonts/gentilis_regular.typeface.json',
+  './vendor/fonts/droid_sans_regular.typeface.json',
   './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png'
 ];

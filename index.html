@@ -465,6 +465,8 @@
           <button class="abtn" data-add="plane">▭ Plano</button>
           <button class="abtn" data-add="torus">🍩 Toroide</button>
           <div class="dropdown-divider"></div>
+          <button class="abtn" data-add="text">🔤 Texto 3D</button>
+          <div class="dropdown-divider"></div>
           <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
         </div>
       </div>
@@ -518,6 +520,11 @@
       <label class="context-slider">Raíz<input id="hairRootRadius" type="range" min="1" max="10" step="0.5" value="4"></label>
       <label class="context-slider">Punta<input id="hairTipRadius" type="range" min="0.2" max="4" step="0.1" value="0.6"></label>
     </div>
+    <div id="splineRow" class="context-group" style="display:none;">
+      <span style="color:#5c6370; font-size:12px;">🧵 Curva: tocá para agregar puntos</span>
+      <button id="splineFinishBtn" class="context-btn" style="background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">✅ Finalizar Curva</button>
+      <span id="splinePointCount" style="color:#8a929e; font-size:11px;"></span>
+    </div>
   </div>
 
   <!-- 3. Left Vertical Tool Palette (Blender / C4D T-Panel) -->
@@ -527,6 +534,7 @@
     <button class="tool-btn tbtn" data-mode="scale" title="Escalar (S)">↕️</button>
     <button class="tool-btn tbtn" data-mode="sculpt" title="Esculpir (Pincel)">🖌️</button>
     <button class="tool-btn tbtn" data-mode="hair" title="Dibujar Pelo">💇</button>
+    <button class="tool-btn tbtn" data-mode="spline" title="Curva / Spline">🧵</button>
   </aside>
 
   <!-- Viewport Canvas -->
@@ -671,6 +679,43 @@
           </div>
         </div>
 
+        <!-- 3b. Texto 3D (En vivo) -->
+        <div id="textPropsSection" style="display:none;">
+          <h3>🔤 Texto 3D</h3>
+          <div class="prop-group">
+            <div class="prop-row">
+              <label>Texto</label>
+              <input id="textContentInput" type="text" maxlength="40" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; color:#e6e6e6;" value="Hola">
+            </div>
+            <div class="prop-row">
+              <label>Tipografía</label>
+              <select id="textFontSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="helvetiker">Redonda</option>
+                <option value="helvetiker_bold">Redonda Negrita</option>
+                <option value="optimer">Geométrica</option>
+                <option value="gentilis">Clásica</option>
+                <option value="droid_sans">Moderna</option>
+              </select>
+            </div>
+            <div class="prop-row">
+              <label>Tamaño: <span id="textSizeVal">60</span> mm</label>
+              <input id="textSizeInput" type="range" min="10" max="200" step="1" value="60">
+            </div>
+            <div class="prop-row">
+              <label>Profundidad: <span id="textDepthVal">20</span> mm</label>
+              <input id="textDepthInput" type="range" min="1" max="80" step="1" value="20">
+            </div>
+            <div class="prop-row-inline">
+              <label>Bisel (bordes redondeados)</label>
+              <input id="textBevelCheck" type="checkbox">
+            </div>
+            <div class="prop-row">
+              <label>Tamaño del Bisel: <span id="textBevelSizeVal">1.5</span> mm</label>
+              <input id="textBevelSizeInput" type="range" min="0.2" max="6" step="0.2" value="1.5">
+            </div>
+          </div>
+        </div>
+
         <!-- 4. Material -->
         <div id="matSection">
           <h3>🎨 Material</h3>
@@ -713,6 +758,28 @@
         <div class="prop-group">
           <button id="cloneSymBtn" class="context-btn btn-mirror" style="justify-content:center;">🪞 Crear Modificador Simetría</button>
           <button id="arrayCloneBtn" class="context-btn" style="justify-content:center; background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">🔁 Crear Modificador Clonador</button>
+          <button id="latheApplyBtn" class="context-btn" style="display:none; justify-content:center; background:#2e1e2e; border-color:#5c2d5c; color:#dd88dd;">🥂 Aplicar Revolución (gira la curva 360°)</button>
+          <div id="latheSegmentsRow" style="display:none;">
+            <label class="context-slider" style="display:flex; justify-content:space-between;">Segmentos de Revolución <span id="latheSegmentsVal">32</span></label>
+            <input id="latheSegmentsInput" type="range" min="6" max="64" step="1" value="32" style="width:100%;">
+          </div>
+          <button id="tubeApplyBtn" class="context-btn" style="display:none; justify-content:center; background:#1e2530; border-color:#2d4a5c; color:#7fc4dd;">🧴 Aplicar Tubo (sigue la curva con grosor)</button>
+          <div id="tubeParamsRow" style="display:none;">
+            <label class="context-slider" style="display:flex; justify-content:space-between;">Grosor Raíz (mm) <span id="tubeRootRadiusVal">14</span></label>
+            <input id="tubeRootRadiusInput" type="range" min="1" max="50" step="0.5" value="14" style="width:100%;">
+            <label class="context-slider" style="display:flex; justify-content:space-between; margin-top:6px;">Grosor Punta (mm) <span id="tubeTipRadiusVal">14</span></label>
+            <input id="tubeTipRadiusInput" type="range" min="1" max="50" step="0.5" value="14" style="width:100%;">
+            <label class="context-slider" style="display:flex; justify-content:space-between; margin-top:6px;">Segmentos Radiales <span id="tubeRadialSegVal">10</span></label>
+            <input id="tubeRadialSegInput" type="range" min="3" max="24" step="1" value="10" style="width:100%;">
+          </div>
+          <button id="extrudeApplyBtn" class="context-btn" style="display:none; justify-content:center; background:#1e2a1e; border-color:#2d5c3d; color:#7add9e;">📐 Aplicar Extrusión (cierra la forma y le da volumen)</button>
+          <div id="extrudeParamsRow" style="display:none;">
+            <label class="context-slider" style="display:flex; justify-content:space-between;">Profundidad (mm) <span id="extrudeDepthVal">24</span></label>
+            <input id="extrudeDepthInput" type="range" min="2" max="150" step="1" value="24" style="width:100%;">
+            <label class="context-slider" style="display:flex; margin-top:6px;"><input id="extrudeBevelCheck" type="checkbox" style="margin-right:6px;"> Bisel (bordes redondeados)</label>
+            <label class="context-slider" style="display:flex; justify-content:space-between; margin-top:6px;">Tamaño del Bisel <span id="extrudeBevelSizeVal">2</span></label>
+            <input id="extrudeBevelSizeInput" type="range" min="0.2" max="10" step="0.2" value="2" style="width:100%;">
+          </div>
         </div>
 
         <!-- 7. Eliminar -->

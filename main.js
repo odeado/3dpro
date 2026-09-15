@@ -7,6 +7,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from './vendor/three-addons/OrbitControls.js';
 import { TransformControls } from './vendor/three-addons/TransformControls.js';
+import { FontLoader } from './vendor/three-addons/loaders/FontLoader.js';
+import { TextGeometry } from './vendor/three-addons/geometries/TextGeometry.js';
 
 const wrap = document.getElementById('canvasWrap');
 const layerList = document.getElementById('layerList');
@@ -162,8 +164,20 @@ let toolMode = 'translate'; // 'translate' | 'rotate' | 'scale' | 'sculpt'
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
   cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)',
-  hair: '💇 Pelo'
+  hair: '💇 Pelo', spline: '🧵 Curva', lathe: '🥂 Revolución', tube: '🧴 Tubo', extrude: '📐 Extrusión', text: '🔤 Texto 3D'
 };
+
+// 'spline' (curva editable, sin generador aplicado todavia) y 'lathe' (ya
+// convertida en un solido de revolucion) comparten con 'hair' el mismo
+// mecanismo de fondo: su geometria no sale de una formula fija (como un
+// cubo o una esfera), sino que hay que guardarla/reconstruirla entera --
+// asi que en todos los lugares donde el codigo ya sabia tratar 'hair'
+// distinto (clonar, guardar/deshacer, exportar), se trata igual a estos
+// tipos ('lathe' y 'tube', ambos generados a partir de una curva). Funcion
+// centralizada para no repetir la lista en cada lugar.
+function isCustomGeomKind(kind) {
+  return kind === 'hair' || kind === 'spline' || kind === 'lathe' || kind === 'tube' || kind === 'extrude' || kind === 'text';
+}
 
 // "let" (no "const"): los deslizadores de grosor en la barra de contexto
 // del modo Pelo cambian estos valores en vivo (ver hairRootRadiusInput /
@@ -174,6 +188,70 @@ let HAIR_ROOT_RADIUS = 4;
 let HAIR_TIP_RADIUS = 0.6;
 const HAIR_DEFAULT_COLOR = 0x3b2415;
 const HAIR_MIN_SPACING = 4; // unidades: no agregar un punto nuevo del trazo si esta muy cerca del anterior
+const SPLINE_DEFAULT_COLOR = 0x4fa8e8; // celeste: para distinguir la curva "de guia" de una figura solida
+const SPLINE_PREVIEW_RADIUS = 3; // grosor (mm) del tubo delgado que representa la curva antes de aplicar un generador
+const TUBE_DEFAULT_ROOT_RADIUS = 14; // grosor por defecto al aplicar el generador Tubo (mango/asa/marco tipico)
+const TUBE_DEFAULT_TIP_RADIUS = 14;
+const TUBE_DEFAULT_RADIAL_SEGMENTS = 10;
+const EXTRUDE_DEFAULT_DEPTH = 24;
+const EXTRUDE_DEFAULT_BEVEL_SIZE = 2;
+
+// --- Texto 3D: varias tipografias para elegir (pedido explicito: "varias
+// fuentes para elegir", no una sola por defecto) -- son los clasicos .json
+// "typeface" que ya trae three.js de ejemplo, cada uno con su contorno de
+// letras ya vectorizado (no hace falta convertir nada nuevo). Se precargan
+// todas apenas arranca la app, en paralelo y sin bloquear el resto, para
+// que despues cambiar de fuente en Atributos sea instantaneo.
+const FONT_SOURCES = {
+  helvetiker: { label: 'Redonda', url: './vendor/fonts/helvetiker_regular.typeface.json' },
+  helvetiker_bold: { label: 'Redonda Negrita', url: './vendor/fonts/helvetiker_bold.typeface.json' },
+  optimer: { label: 'Geométrica', url: './vendor/fonts/optimer_regular.typeface.json' },
+  gentilis: { label: 'Clásica', url: './vendor/fonts/gentilis_regular.typeface.json' },
+  droid_sans: { label: 'Moderna', url: './vendor/fonts/droid_sans_regular.typeface.json' },
+};
+const TEXT_DEFAULT_FONT = 'helvetiker';
+const TEXT_DEFAULT_TEXT = 'Hola';
+const TEXT_DEFAULT_SIZE = 60;
+const TEXT_DEFAULT_DEPTH = 20;
+const TEXT_DEFAULT_BEVEL_SIZE = 1.5;
+
+const fontLoader = new FontLoader();
+const fontCache = {};        // fontKey -> Font ya cargada
+const fontLoadPromises = {}; // fontKey -> Promise (para no pedirla dos veces)
+function loadFont(key) {
+  const src = FONT_SOURCES[key] ? key : TEXT_DEFAULT_FONT;
+  if (fontCache[src]) return Promise.resolve(fontCache[src]);
+  if (fontLoadPromises[src]) return fontLoadPromises[src];
+  fontLoadPromises[src] = new Promise((resolve) => {
+    fontLoader.load(FONT_SOURCES[src].url, (font) => { fontCache[src] = font; resolve(font); },
+      undefined, (err) => { console.error('No se pudo cargar la tipografia', src, err); resolve(null); });
+  });
+  return fontLoadPromises[src];
+}
+Object.keys(FONT_SOURCES).forEach(k => loadFont(k)); // precarga de entrada, en paralelo
+
+// Arma la geometria 3D de un texto con la tipografia ya cargada -- si la
+// tipografia pedida todavia no esta lista, devuelve una geometria vacia (el
+// llamador se encarga de reconstruir de nuevo cuando termine de cargar).
+function buildTextGeometry(text, fontKey, size, depth, bevelEnabled, bevelSize) {
+  const font = fontCache[fontKey] || fontCache[TEXT_DEFAULT_FONT];
+  if (!font || !text) return new THREE.BufferGeometry();
+  const geo = new TextGeometry(text, {
+    font, size, depth, curveSegments: 8,
+    bevelEnabled: !!bevelEnabled,
+    bevelThickness: bevelEnabled ? bevelSize : 0,
+    bevelSize: bevelEnabled ? bevelSize : 0,
+    bevelSegments: 2,
+  });
+  geo.computeBoundingBox();
+  // El texto arranca con su origen en la esquina inferior izquierda de la
+  // primera letra -- se centra en su propio medio para que el gizmo y los
+  // tiradores queden en el centro, igual que en cualquier otra figura.
+  const bb = geo.boundingBox;
+  geo.translate(-(bb.max.x + bb.min.x) / 2, -(bb.max.y + bb.min.y) / 2, -(bb.max.z + bb.min.z) / 2);
+  geo.computeVertexNormals();
+  return geo;
+}
 
 // Arma un tubo afinado (grueso en la raiz, fino en la punta) que pasa por
 // "points" -- mismo metodo que usa THREE.TubeGeometry por dentro
@@ -286,10 +364,11 @@ function buildObject(kind, colorHex, extra) {
   const opacity = (extra && extra.opacity != null) ? extra.opacity : 1.0;
   const wireframe = (extra && extra.wireframe != null) ? !!extra.wireframe : false;
 
-  if (kind === 'hair') {
+  if (isCustomGeomKind(kind)) {
     const geo = extra && extra.geometryData ? geometryFromSerialized(extra.geometryData) : new THREE.BufferGeometry();
+    const defaultColor = kind === 'hair' ? HAIR_DEFAULT_COLOR : (kind === 'spline' ? SPLINE_DEFAULT_COLOR : DEFAULT_COLOR);
     const mat = new THREE.MeshStandardMaterial({
-      color: colorHex != null ? colorHex : HAIR_DEFAULT_COLOR,
+      color: colorHex != null ? colorHex : defaultColor,
       roughness, metalness, opacity,
       transparent: opacity < 1,
       wireframe,
@@ -327,6 +406,7 @@ function nextPlacement() {
 }
 
 function addPrimitive(kind) {
+  if (kind === 'text') { addTextPrimitive(); return; }
   const built = buildObject(kind);
   const pos = nextPlacement();
   built.node.position.set(pos.x, pos.y, pos.z);
@@ -337,6 +417,42 @@ function addPrimitive(kind) {
   renderLayerList();
   selectObject(id);
   pushHistory();
+}
+
+// El Texto 3D no arma su geometria con una formula fija como un cubo --
+// necesita esperar a que la tipografia elegida termine de cargar (async) y
+// despues generar el contorno de cada letra con TextGeometry. Por eso tiene
+// su propia funcion de creacion en vez de pasar por buildObject() directo.
+async function addTextPrimitive() {
+  const font = await loadFont(TEXT_DEFAULT_FONT);
+  const built = buildObject('text', undefined, {});
+  built.node.geometry.dispose();
+  built.node.geometry = font
+    ? buildTextGeometry(TEXT_DEFAULT_TEXT, TEXT_DEFAULT_FONT, TEXT_DEFAULT_SIZE, TEXT_DEFAULT_DEPTH, false, TEXT_DEFAULT_BEVEL_SIZE)
+    : new THREE.BufferGeometry();
+  const pos = nextPlacement();
+  built.node.position.set(pos.x, pos.y, pos.z);
+  scene.add(built.node);
+  const id = objIdCounter++;
+  built.pickMesh.userData.ownerId = id;
+  sceneObjects.set(id, {
+    id, kind: 'text', mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false,
+    text: TEXT_DEFAULT_TEXT, fontKey: TEXT_DEFAULT_FONT, textSize: TEXT_DEFAULT_SIZE, textDepth: TEXT_DEFAULT_DEPTH, textBevel: false, textBevelSize: TEXT_DEFAULT_BEVEL_SIZE
+  });
+  renderLayerList();
+  selectObject(id);
+  pushHistory();
+}
+
+// Reconstruye la geometria de un Texto 3D ya existente a partir de sus
+// parametros actuales (entry.text/fontKey/textSize/textDepth/textBevel...)
+// -- se llama cada vez que se toca cualquiera de los controles en vivo de
+// Atributos, para que el cambio se vea al instante.
+function rebuildTextGeometry(entry) {
+  if (!entry || entry.kind !== 'text') return;
+  const geo = buildTextGeometry(entry.text, entry.fontKey, entry.textSize, entry.textDepth, entry.textBevel, entry.textBevelSize);
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = geo;
 }
 
 function disposeEntry(entry) {
@@ -390,18 +506,18 @@ function cloneObject(id) {
     opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
-  if (src.kind === 'hair') {
+  if (isCustomGeomKind(src.kind)) {
     extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
   }
   const built = buildObject(src.kind, colorHex, extraOpts);
   built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
-  const copiedSculpt = src.kind === 'hair' ? false : copySculptIfAny(src, built.node);
+  const copiedSculpt = isCustomGeomKind(src.kind) ? false : copySculptIfAny(src, built.node);
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -419,7 +535,7 @@ function cloneObjectSymmetry(id) {
     opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
-  if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  if (isCustomGeomKind(src.kind)) extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
 
   // 1. Crear el objeto espejo con material idéntico
   const mirror = buildObject(src.kind, colorHex, extraOpts);
@@ -630,6 +746,7 @@ const matSection = document.getElementById('matSection');
 const dimRow = document.getElementById('dimRow');
 const symPropsSection = document.getElementById('symPropsSection');
 const clonerPropsSection = document.getElementById('clonerPropsSection');
+const textPropsSection = document.getElementById('textPropsSection');
 
 // Transform inputs
 const posX = document.getElementById('posX');
@@ -831,10 +948,118 @@ function selectObject(id) {
       }
     }
 
+    // Generador de Revolucion (Lathe): el boton para aplicarlo solo tiene
+    // sentido sobre una curva ('spline') todavia sin convertir; una vez
+    // aplicado, en su lugar aparece el control en vivo de "Segmentos" --
+    // mismo patron que Simetria/Clonador (parametros del generador
+    // siempre editables despues en Atributos, no solo al crearlo).
+    if (latheApplyBtn) latheApplyBtn.style.display = (entry.kind === 'spline') ? 'flex' : 'none';
+    const latheSegmentsRow = document.getElementById('latheSegmentsRow');
+    if (latheSegmentsRow) {
+      latheSegmentsRow.style.display = (entry.kind === 'lathe') ? 'block' : 'none';
+      if (entry.kind === 'lathe') {
+        const latheSegmentsInput = document.getElementById('latheSegmentsInput');
+        const latheSegmentsVal = document.getElementById('latheSegmentsVal');
+        const segs = entry.latheSegments || 32;
+        if (latheSegmentsInput) latheSegmentsInput.value = segs;
+        if (latheSegmentsVal) latheSegmentsVal.textContent = segs;
+      }
+    }
+
+    // Generador de Tubo: mismo patron que Revolucion -- el boton para
+    // aplicarlo aparece sobre una curva sin convertir todavia, y una vez
+    // aplicado aparecen los 3 controles en vivo (grosor raiz/punta,
+    // segmentos radiales) en su lugar.
+    const tubeApplyBtnEl = document.getElementById('tubeApplyBtn');
+    if (tubeApplyBtnEl) tubeApplyBtnEl.style.display = (entry.kind === 'spline') ? 'flex' : 'none';
+    const tubeParamsRow = document.getElementById('tubeParamsRow');
+    if (tubeParamsRow) {
+      tubeParamsRow.style.display = (entry.kind === 'tube') ? 'block' : 'none';
+      if (entry.kind === 'tube') {
+        const tubeRootInput = document.getElementById('tubeRootRadiusInput');
+        const tubeRootVal = document.getElementById('tubeRootRadiusVal');
+        const tubeTipInput = document.getElementById('tubeTipRadiusInput');
+        const tubeTipVal = document.getElementById('tubeTipRadiusVal');
+        const tubeSegInput = document.getElementById('tubeRadialSegInput');
+        const tubeSegVal = document.getElementById('tubeRadialSegVal');
+        const root = entry.tubeRootRadius != null ? entry.tubeRootRadius : TUBE_DEFAULT_ROOT_RADIUS;
+        const tip = entry.tubeTipRadius != null ? entry.tubeTipRadius : TUBE_DEFAULT_TIP_RADIUS;
+        const segs = entry.tubeRadialSegments || TUBE_DEFAULT_RADIAL_SEGMENTS;
+        if (tubeRootInput) tubeRootInput.value = root;
+        if (tubeRootVal) tubeRootVal.textContent = root;
+        if (tubeTipInput) tubeTipInput.value = tip;
+        if (tubeTipVal) tubeTipVal.textContent = tip;
+        if (tubeSegInput) tubeSegInput.value = segs;
+        if (tubeSegVal) tubeSegVal.textContent = segs;
+      }
+    }
+
+    // Generador de Extrusión: mismo patron -- boton sobre una curva
+    // cerrada sin convertir, y una vez aplicado los controles en vivo de
+    // profundidad y bisel en su lugar.
+    const extrudeApplyBtnEl = document.getElementById('extrudeApplyBtn');
+    if (extrudeApplyBtnEl) extrudeApplyBtnEl.style.display = (entry.kind === 'spline') ? 'flex' : 'none';
+    const extrudeParamsRow = document.getElementById('extrudeParamsRow');
+    if (extrudeParamsRow) {
+      extrudeParamsRow.style.display = (entry.kind === 'extrude') ? 'block' : 'none';
+      if (entry.kind === 'extrude') {
+        const extrudeDepthInput = document.getElementById('extrudeDepthInput');
+        const extrudeDepthVal = document.getElementById('extrudeDepthVal');
+        const extrudeBevelCheck = document.getElementById('extrudeBevelCheck');
+        const extrudeBevelSizeInput = document.getElementById('extrudeBevelSizeInput');
+        const extrudeBevelSizeVal = document.getElementById('extrudeBevelSizeVal');
+        const depth = entry.extrudeDepth != null ? entry.extrudeDepth : EXTRUDE_DEFAULT_DEPTH;
+        const bsize = entry.extrudeBevelSize != null ? entry.extrudeBevelSize : EXTRUDE_DEFAULT_BEVEL_SIZE;
+        if (extrudeDepthInput) extrudeDepthInput.value = depth;
+        if (extrudeDepthVal) extrudeDepthVal.textContent = depth;
+        if (extrudeBevelCheck) extrudeBevelCheck.checked = !!entry.extrudeBevel;
+        if (extrudeBevelSizeInput) extrudeBevelSizeInput.value = bsize;
+        if (extrudeBevelSizeVal) extrudeBevelSizeVal.textContent = bsize;
+      }
+    }
+
+    // Texto 3D: contenido, tipografia, tamaño, profundidad y bisel, todo
+    // editable en vivo (misma regla de siempre: todo parametro del
+    // generador queda disponible despues en Atributos, no solo al crearlo).
+    if (textPropsSection) {
+      textPropsSection.style.display = (entry.kind === 'text') ? 'block' : 'none';
+      if (entry.kind === 'text') {
+        const textContentInput = document.getElementById('textContentInput');
+        const textFontSelect = document.getElementById('textFontSelect');
+        const textSizeInput = document.getElementById('textSizeInput');
+        const textSizeVal = document.getElementById('textSizeVal');
+        const textDepthInput = document.getElementById('textDepthInput');
+        const textDepthVal = document.getElementById('textDepthVal');
+        const textBevelCheck = document.getElementById('textBevelCheck');
+        const textBevelSizeInput = document.getElementById('textBevelSizeInput');
+        const textBevelSizeVal = document.getElementById('textBevelSizeVal');
+        if (textContentInput) textContentInput.value = entry.text != null ? entry.text : TEXT_DEFAULT_TEXT;
+        if (textFontSelect) textFontSelect.value = entry.fontKey || TEXT_DEFAULT_FONT;
+        const size = entry.textSize != null ? entry.textSize : TEXT_DEFAULT_SIZE;
+        const depth = entry.textDepth != null ? entry.textDepth : TEXT_DEFAULT_DEPTH;
+        const bsize = entry.textBevelSize != null ? entry.textBevelSize : TEXT_DEFAULT_BEVEL_SIZE;
+        if (textSizeInput) textSizeInput.value = size;
+        if (textSizeVal) textSizeVal.textContent = size;
+        if (textDepthInput) textDepthInput.value = depth;
+        if (textDepthVal) textDepthVal.textContent = depth;
+        if (textBevelCheck) textBevelCheck.checked = !!entry.textBevel;
+        if (textBevelSizeInput) textBevelSizeInput.value = bsize;
+        if (textBevelSizeVal) textBevelSizeVal.textContent = bsize;
+      }
+    }
+
+    // Si estamos en modo Curva, mostrar/ocultar las bolitas de edicion de
+    // puntos segun si lo seleccionado es o no un Spline sin convertir.
+    if (toolMode === 'spline') {
+      if (entry.kind === 'spline') startSplinePointEdit(id);
+      else stopSplinePointEdit();
+    }
+
   } else {
     transform.detach();
     propsPanel.style.display = 'none';
     if (noSelectionMsg) noSelectionMsg.style.display = 'block';
+    if (toolMode === 'spline') stopSplinePointEdit();
   }
   updateHandles(id);
   renderLayerList();
@@ -1676,7 +1901,7 @@ function remirrorSymmetry(symEntry) {
   const srcId = symEntry.symmetrySourceId;
   const src = sceneObjects.get(srcId);
   if (!src) return;
-  if (src.kind === 'hair') return; // el pelo no guarda los puntos del trazo por separado -- no se puede re-espejar sin volver a dibujar
+  if (isCustomGeomKind(src.kind)) return; // el pelo/curva/revolucion no tienen una formula fija -- no se pueden re-espejar sin repetir el trazo/generador
   let mirrorEntry = null;
   sceneObjects.forEach(e => { if (e.parentId === symEntry.id && e.isMirrorOf === srcId) mirrorEntry = e; });
   if (!mirrorEntry || !mirrorEntry.mesh.geometry || !src.mesh.geometry) return;
@@ -1983,6 +2208,123 @@ if (clonerCountInput) {
   inp.addEventListener('change', () => pushHistory());
 });
 
+const latheSegmentsInput = document.getElementById('latheSegmentsInput');
+const latheSegmentsVal = document.getElementById('latheSegmentsVal');
+if (latheSegmentsInput) {
+  latheSegmentsInput.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || entry.kind !== 'lathe') return;
+    const segs = parseInt(latheSegmentsInput.value) || 32;
+    if (latheSegmentsVal) latheSegmentsVal.textContent = segs;
+    applyLathe(entry, segs);
+  });
+  latheSegmentsInput.addEventListener('change', () => pushHistory());
+}
+
+const tubeRootRadiusInput = document.getElementById('tubeRootRadiusInput');
+const tubeRootRadiusVal = document.getElementById('tubeRootRadiusVal');
+const tubeTipRadiusInput = document.getElementById('tubeTipRadiusInput');
+const tubeTipRadiusVal = document.getElementById('tubeTipRadiusVal');
+const tubeRadialSegInput = document.getElementById('tubeRadialSegInput');
+const tubeRadialSegVal = document.getElementById('tubeRadialSegVal');
+
+function liveTubeUpdate() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind !== 'tube') return;
+  const root = parseFloat(tubeRootRadiusInput.value) || 0.5;
+  const tip = parseFloat(tubeTipRadiusInput.value) || 0.5;
+  const segs = parseInt(tubeRadialSegInput.value) || TUBE_DEFAULT_RADIAL_SEGMENTS;
+  if (tubeRootRadiusVal) tubeRootRadiusVal.textContent = root;
+  if (tubeTipRadiusVal) tubeTipRadiusVal.textContent = tip;
+  if (tubeRadialSegVal) tubeRadialSegVal.textContent = segs;
+  applyTube(entry, root, tip, segs);
+}
+[tubeRootRadiusInput, tubeTipRadiusInput, tubeRadialSegInput].forEach(inp => {
+  if (!inp) return;
+  inp.addEventListener('input', liveTubeUpdate);
+  inp.addEventListener('change', () => pushHistory());
+});
+
+const extrudeDepthInput = document.getElementById('extrudeDepthInput');
+const extrudeDepthVal = document.getElementById('extrudeDepthVal');
+const extrudeBevelCheck = document.getElementById('extrudeBevelCheck');
+const extrudeBevelSizeInput = document.getElementById('extrudeBevelSizeInput');
+const extrudeBevelSizeVal = document.getElementById('extrudeBevelSizeVal');
+
+function liveExtrudeUpdate() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind !== 'extrude') return;
+  const depth = parseFloat(extrudeDepthInput.value) || 1;
+  const bevel = !!extrudeBevelCheck.checked;
+  const bsize = parseFloat(extrudeBevelSizeInput.value) || 0;
+  if (extrudeDepthVal) extrudeDepthVal.textContent = depth;
+  if (extrudeBevelSizeVal) extrudeBevelSizeVal.textContent = bsize;
+  applyExtrude(entry, depth, bevel, bsize);
+}
+[extrudeDepthInput, extrudeBevelCheck, extrudeBevelSizeInput].forEach(inp => {
+  if (!inp) return;
+  inp.addEventListener('input', liveExtrudeUpdate);
+  inp.addEventListener('change', () => pushHistory());
+});
+
+// --- Texto 3D: contenido, tipografia, tamaño, profundidad, bisel (todo en vivo) ---
+const textContentInput = document.getElementById('textContentInput');
+const textFontSelect = document.getElementById('textFontSelect');
+const textSizeInput = document.getElementById('textSizeInput');
+const textSizeVal = document.getElementById('textSizeVal');
+const textDepthInput = document.getElementById('textDepthInput');
+const textDepthVal = document.getElementById('textDepthVal');
+const textBevelCheck = document.getElementById('textBevelCheck');
+const textBevelSizeInput = document.getElementById('textBevelSizeInput');
+const textBevelSizeVal = document.getElementById('textBevelSizeVal');
+
+function liveTextUpdate() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind !== 'text') return;
+  entry.text = textContentInput.value || '';
+  entry.textSize = parseFloat(textSizeInput.value) || 1;
+  entry.textDepth = parseFloat(textDepthInput.value) || 0.1;
+  entry.textBevel = !!textBevelCheck.checked;
+  entry.textBevelSize = parseFloat(textBevelSizeInput.value) || 0;
+  if (textSizeVal) textSizeVal.textContent = entry.textSize;
+  if (textDepthVal) textDepthVal.textContent = entry.textDepth;
+  if (textBevelSizeVal) textBevelSizeVal.textContent = entry.textBevelSize;
+  rebuildTextGeometry(entry);
+  updateHandles(entry.id);
+}
+[textContentInput, textSizeInput, textDepthInput, textBevelCheck, textBevelSizeInput].forEach(inp => {
+  if (!inp) return;
+  inp.addEventListener('input', liveTextUpdate);
+  inp.addEventListener('change', () => pushHistory());
+});
+if (textFontSelect) {
+  textFontSelect.addEventListener('change', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || entry.kind !== 'text') return;
+    const key = textFontSelect.value;
+    const entryId = entry.id;
+    entry.fontKey = key;
+    loadFont(key).then(() => {
+      // Puede que el usuario ya haya cambiado de seleccion o de fuente para
+      // cuando la tipografia termina de cargar -- se vuelve a buscar la
+      // MISMA figura por su id (no por "selectedId", que puede haber
+      // cambiado) y se confirma que siga pidiendo esta fuente, para no
+      // pisar otra figura ni una eleccion mas nueva del usuario.
+      const stillEntry = sceneObjects.get(entryId);
+      if (stillEntry && stillEntry.kind === 'text' && stillEntry.fontKey === key) {
+        rebuildTextGeometry(stillEntry);
+        updateHandles(stillEntry.id);
+      }
+    });
+    pushHistory();
+  });
+}
+
 if (clonerRadiusInput) {
   clonerRadiusInput.addEventListener('input', () => {
     const cloner = getActiveCloner();
@@ -2271,8 +2613,26 @@ function snapshotScene() {
       symOffset: e.symOffset != null ? e.symOffset : null,
       isMirrorOf: e.isMirrorOf != null ? e.isMirrorOf : null
     };
-    if (e.kind === 'hair' && e.mesh.geometry) {
+    if (isCustomGeomKind(e.kind) && e.mesh.geometry) {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
+      if (e.splinePoints) {
+        s.splinePoints = e.splinePoints.map(p => [p.x, p.y, p.z]);
+        s.latheSegments = e.latheSegments != null ? e.latheSegments : null;
+        s.tubeRootRadius = e.tubeRootRadius != null ? e.tubeRootRadius : null;
+        s.tubeTipRadius = e.tubeTipRadius != null ? e.tubeTipRadius : null;
+        s.tubeRadialSegments = e.tubeRadialSegments != null ? e.tubeRadialSegments : null;
+        s.extrudeDepth = e.extrudeDepth != null ? e.extrudeDepth : null;
+        s.extrudeBevel = e.extrudeBevel != null ? e.extrudeBevel : null;
+        s.extrudeBevelSize = e.extrudeBevelSize != null ? e.extrudeBevelSize : null;
+      }
+      if (e.kind === 'text') {
+        s.text = e.text != null ? e.text : null;
+        s.fontKey = e.fontKey || null;
+        s.textSize = e.textSize != null ? e.textSize : null;
+        s.textDepth = e.textDepth != null ? e.textDepth : null;
+        s.textBevel = e.textBevel != null ? e.textBevel : null;
+        s.textBevelSize = e.textBevelSize != null ? e.textBevelSize : null;
+      }
     } else if (e.sculpted && e.mesh.geometry && e.mesh.geometry.attributes.position) {
       // Solo se guardan los vertices de las figuras que de verdad se
       // esculpieron -- las demas se reconstruyen con su geometria de
@@ -2304,7 +2664,7 @@ function rebuildSceneFrom(snap) {
     built.node.scale.set(s.sx, s.sy, s.sz);
     built.node.visible = s.visible;
     let sculpted = false;
-    if (s.kind !== 'hair' && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
+    if (!isCustomGeomKind(s.kind) && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
         built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
       built.node.geometry.attributes.position.array.set(s.sculptPositions);
       built.node.geometry.attributes.position.needsUpdate = true;
@@ -2326,7 +2686,21 @@ function rebuildSceneFrom(snap) {
       radius: s.radius, rotCopies: s.rotCopies,
       symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
       symAxis: s.symAxis, symOffset: s.symOffset,
-      isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null
+      isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
+      splinePoints: s.splinePoints ? s.splinePoints.map(a => new THREE.Vector3(a[0], a[1], a[2])) : undefined,
+      latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
+      tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
+      tubeTipRadius: s.tubeTipRadius != null ? s.tubeTipRadius : undefined,
+      tubeRadialSegments: s.tubeRadialSegments != null ? s.tubeRadialSegments : undefined,
+      extrudeDepth: s.extrudeDepth != null ? s.extrudeDepth : undefined,
+      extrudeBevel: s.extrudeBevel != null ? s.extrudeBevel : undefined,
+      extrudeBevelSize: s.extrudeBevelSize != null ? s.extrudeBevelSize : undefined,
+      text: s.text != null ? s.text : undefined,
+      fontKey: s.fontKey || undefined,
+      textSize: s.textSize != null ? s.textSize : undefined,
+      textDepth: s.textDepth != null ? s.textDepth : undefined,
+      textBevel: s.textBevel != null ? s.textBevel : undefined,
+      textBevelSize: s.textBevelSize != null ? s.textBevelSize : undefined
     });
     if (s.id > maxId) maxId = s.id;
   });
@@ -2756,6 +3130,382 @@ function finishHairStroke() {
   pushHistory();
 }
 
+// =====================================================================
+// SPLINE / CURVA: puntos editables para armar una linea curva, base para
+// los generadores que se construyen sobre ella (Revolucion/Lathe primero;
+// Tubo/Sweep y Extrusion despues) -- el mismo concepto que "Curva" en
+// Blender o "Spline" en Cinema4D, con sus modificadores/NURBS.
+//
+// A diferencia del Pelo (un trazo continuo de una sola vez, que queda fijo
+// para siempre), el Spline es de PUNTOS DISCRETOS: cada toque agrega UN
+// punto nuevo, y una vez terminada la curva se puede volver a entrar y
+// ARRASTRAR cualquier punto para ajustarlo (bolitas, mismo estilo tactil
+// que los tiradores de redimensionar) o agregar mas puntos al final
+// tocando en el aire. Sin manijas tipo Bezier (mas simple para el dedo) --
+// la curva se suaviza sola entre puntos con Catmull-Rom, igual que ya hace
+// el Pelo por dentro.
+// =====================================================================
+let splinePoints = [];      // world-space, curva EN CONSTRUCCION (antes de "Finalizar Curva")
+let splinePreviewMesh = null;
+let splineEditingId = null; // id del objeto 'spline' cuyos puntos se estan mostrando/editando ahora
+const splinePointGroup = new THREE.Group();
+scene.add(splinePointGroup);
+let splinePointMeshes = [];
+let draggingSplinePointIndex = -1;
+const splineFinishBtn = document.getElementById('splineFinishBtn');
+const splinePointCountEl = document.getElementById('splinePointCount');
+const latheApplyBtn = document.getElementById('latheApplyBtn');
+
+function clearSplinePreview() {
+  if (!splinePreviewMesh) return;
+  scene.remove(splinePreviewMesh);
+  splinePreviewMesh.geometry.dispose();
+  splinePreviewMesh.material.dispose();
+  splinePreviewMesh = null;
+}
+
+function updateSplinePreview() {
+  if (splinePointCountEl) splinePointCountEl.textContent = splinePoints.length + ' punto' + (splinePoints.length === 1 ? '' : 's');
+  if (splinePoints.length < 2) return;
+  const geo = buildTaperedTubeGeometry(splinePoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
+  if (!splinePreviewMesh) {
+    splinePreviewMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: SPLINE_DEFAULT_COLOR, roughness: 0.4, side: THREE.DoubleSide, transparent: true, opacity: 0.85 }));
+    scene.add(splinePreviewMesh);
+  } else {
+    splinePreviewMesh.geometry.dispose();
+    splinePreviewMesh.geometry = geo;
+  }
+}
+
+function createSplineObjectFromPoints(pts) {
+  const origin = pts[0].clone();
+  const localPoints = pts.map(p => p.clone().sub(origin));
+  const geo = buildTaperedTubeGeometry(localPoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
+  const mat = new THREE.MeshStandardMaterial({ color: SPLINE_DEFAULT_COLOR, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.position.copy(origin);
+  scene.add(mesh);
+  const id = objIdCounter++;
+  mesh.userData.ownerId = id;
+  sceneObjects.set(id, { id, kind: 'spline', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false, splinePoints: localPoints });
+  return id;
+}
+
+function finishSplineDraw() {
+  clearSplinePreview();
+  if (splinePoints.length < 2) { splinePoints = []; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
+  const id = createSplineObjectFromPoints(splinePoints);
+  splinePoints = [];
+  if (splinePointCountEl) splinePointCountEl.textContent = '';
+  renderLayerList();
+  selectObject(id);
+  pushHistory();
+  startSplinePointEdit(id); // deja los puntos listos para ajustar de una, sin tener que volver a entrar
+}
+if (splineFinishBtn) splineFinishBtn.addEventListener('click', finishSplineDraw);
+
+// --- Edicion de los puntos de un Spline ya creado ---
+function clearSplinePointHandles() {
+  splinePointMeshes.forEach(m => { splinePointGroup.remove(m); m.geometry.dispose(); m.material.dispose(); });
+  splinePointMeshes = [];
+}
+
+function refreshSplinePointHandles() {
+  clearSplinePointHandles();
+  if (splineEditingId == null) return;
+  const entry = sceneObjects.get(splineEditingId);
+  if (!entry || entry.kind !== 'spline' || !entry.splinePoints) { splineEditingId = null; return; }
+  entry.mesh.updateMatrixWorld(true);
+  entry.splinePoints.forEach((p, i) => {
+    const world = p.clone().applyMatrix4(entry.mesh.matrixWorld);
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(6, 10, 8),
+      new THREE.MeshBasicMaterial({ color: i === 0 ? 0x88dd88 : 0xffcc44, depthTest: false })
+    );
+    mesh.renderOrder = 999;
+    mesh.position.copy(world);
+    mesh.userData.pointIndex = i;
+    splinePointGroup.add(mesh);
+    splinePointMeshes.push(mesh);
+  });
+}
+
+function startSplinePointEdit(id) {
+  splineEditingId = id;
+  refreshSplinePointHandles();
+}
+
+function stopSplinePointEdit() {
+  splineEditingId = null;
+  clearSplinePointHandles();
+}
+
+function rebuildSplineGeometry(entry) {
+  const geo = buildTaperedTubeGeometry(entry.splinePoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = geo;
+}
+
+let splineDragging = false;
+function startSplinePointDrag(mesh) {
+  draggingSplinePointIndex = mesh.userData.pointIndex;
+  splineDragging = true;
+  orbit.enabled = false;
+}
+
+function onSplinePointDrag(clientX, clientY) {
+  if (draggingSplinePointIndex < 0 || splineEditingId == null) return;
+  const entry = sceneObjects.get(splineEditingId);
+  if (!entry) return;
+  const worldPoint = nextHairPoint(clientX, clientY); // reusa el mismo raycast que ya usa Pelo (pega en superficies, o en un plano de referencia si no hay nada)
+  const local = entry.mesh.worldToLocal(worldPoint.clone());
+  entry.splinePoints[draggingSplinePointIndex].copy(local);
+  rebuildSplineGeometry(entry);
+  refreshSplinePointHandles();
+}
+
+function stopSplinePointDrag() {
+  if (draggingSplinePointIndex < 0) return;
+  draggingSplinePointIndex = -1;
+  splineDragging = false;
+  orbit.enabled = true;
+  pushHistory();
+}
+
+function removeSplinePointAt(entry, index) {
+  if (entry.splinePoints.length <= 2) return; // no dejar una curva con menos de 2 puntos
+  entry.splinePoints.splice(index, 1);
+  rebuildSplineGeometry(entry);
+  refreshSplinePointHandles();
+  pushHistory();
+}
+
+// Tocar: si se toca una bolita existente, arranca el arrastre de ese punto;
+// si no hay ninguna bolita tocada pero se esta editando una curva ya
+// creada, el toque AGREGA un punto nuevo al final; si no hay ninguna curva
+// en edicion, el toque agrega un punto al trazo NUEVO que se esta armando.
+wrap.addEventListener('pointerdown', (e) => {
+  if (toolMode !== 'spline') return;
+  const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const hits = raycaster.intersectObjects(splinePointMeshes, false);
+  if (hits.length > 0) {
+    e.stopPropagation();
+    startSplinePointDrag(hits[0].object);
+    return;
+  }
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (entry) { addSplinePointAtEndFromScreen(entry, e.clientX, e.clientY); return; }
+  }
+  const p = nextHairPoint(e.clientX, e.clientY);
+  splinePoints.push(p);
+  updateSplinePreview();
+}, { capture: true });
+
+function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
+  const worldPoint = nextHairPoint(clientX, clientY);
+  const local = entry.mesh.worldToLocal(worldPoint.clone());
+  entry.splinePoints.push(local);
+  rebuildSplineGeometry(entry);
+  refreshSplinePointHandles();
+  pushHistory();
+}
+
+// Doble toque sobre una bolita: saca ese punto de la curva (si quedan mas
+// de 2). Mismo gesto que "borrar" en la mayoria de editores de curvas.
+wrap.addEventListener('dblclick', (e) => {
+  if (toolMode !== 'spline' || splineEditingId == null) return;
+  const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const hits = raycaster.intersectObjects(splinePointMeshes, false);
+  if (hits.length === 0) return;
+  const entry = sceneObjects.get(splineEditingId);
+  if (!entry) return;
+  removeSplinePointAt(entry, hits[0].object.userData.pointIndex);
+});
+
+// =====================================================================
+// GENERADOR: REVOLUCION / LATHE -- convierte la curva en un solido
+// girandola 360 grados, igual que "Lathe NURBS" en Cinema4D o el
+// modificador "Screw"/spin en Blender: sirve para copas, floreros,
+// cuencos, botellas -- cualquier figura que sea igual mirada desde
+// cualquier lado alrededor de un eje vertical.
+// La distancia de cada punto al eje Y (hypot(x,z), sin importar si la
+// curva se dibujo en la vista Frente o Izquierda) se usa como radio, y su
+// altura (y) como la altura del perfil -- se ordenan de abajo hacia
+// arriba, que es como three.js espera el perfil de un LatheGeometry.
+// =====================================================================
+function latheProfileFromPoints(points) {
+  const profile = points
+    .map(p => new THREE.Vector2(Math.max(0.01, Math.hypot(p.x, p.z)), p.y))
+    .sort((a, b) => a.y - b.y);
+  // Evitar segmentos de altura identica (LatheGeometry no soporta un radio
+  // "saltando" en el mismo Y) -- se separan por una fraccion de mm.
+  for (let i = 1; i < profile.length; i++) {
+    if (profile[i].y <= profile[i - 1].y) profile[i].y = profile[i - 1].y + 0.01;
+  }
+  return profile;
+}
+
+function applyLathe(entry, segments) {
+  // Acepta tanto una curva sin convertir todavia ('spline', la primera vez
+  // que se aplica el generador) como una ya convertida ('lathe', cuando
+  // el slider de "Segmentos" en Atributos la vuelve a generar en vivo con
+  // otro valor) -- ambas conservan splinePoints para poder rehacerla.
+  if (!entry || (entry.kind !== 'spline' && entry.kind !== 'lathe') || !entry.splinePoints || entry.splinePoints.length < 2) return;
+  const segs = segments != null ? segments : (entry.latheSegments || 32);
+  const profile = latheProfileFromPoints(entry.splinePoints);
+  const geo = new THREE.LatheGeometry(profile, segs);
+  geo.computeVertexNormals();
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = geo;
+  entry.mesh.material.side = THREE.FrontSide;
+  entry.kind = 'lathe';
+  entry.latheSegments = segs;
+  if (splineEditingId === entry.id) stopSplinePointEdit();
+  renderLayerList();
+  updateHandles(entry.id);
+}
+if (latheApplyBtn) latheApplyBtn.addEventListener('click', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  applyLathe(entry, entry ? entry.latheSegments : undefined);
+  selectObject(selectedId); // refresca Atributos: ahora es 'lathe', no 'spline'
+  pushHistory();
+});
+
+// =====================================================================
+// GENERADOR: TUBO / SWEEP -- convierte la curva en un tubo solido con
+// grosor ajustable en la raiz y en la punta, igual que el modificador
+// "Sweep" de Cinema4D o "Extrude along curve" en Blender: sirve para
+// mangos, asas, cuernos, colas, marcos, aros -- cualquier figura larga
+// que siga una linea curva. Reusa el mismo builder que ya usa Pelo
+// (buildTaperedTubeGeometry), solo que sobre los puntos EDITABLES del
+// Spline en vez de un trazo fijo -- por eso, a diferencia del Pelo, sus
+// tres parametros quedan siempre editables en vivo desde Atributos.
+// =====================================================================
+function applyTube(entry, rootRadius, tipRadius, radialSegments) {
+  // Igual que applyLathe: acepta una curva sin convertir ('spline', la
+  // primera vez que se aplica el generador) o una ya convertida ('tube',
+  // cuando los deslizadores de Atributos la regeneran en vivo con otro
+  // grosor/segmentos) -- ambas conservan splinePoints para poder rehacerla.
+  if (!entry || (entry.kind !== 'spline' && entry.kind !== 'tube') || !entry.splinePoints || entry.splinePoints.length < 2) return;
+  const root = rootRadius != null ? rootRadius : (entry.tubeRootRadius != null ? entry.tubeRootRadius : TUBE_DEFAULT_ROOT_RADIUS);
+  const tip = tipRadius != null ? tipRadius : (entry.tubeTipRadius != null ? entry.tubeTipRadius : TUBE_DEFAULT_TIP_RADIUS);
+  const segs = radialSegments != null ? radialSegments : (entry.tubeRadialSegments || TUBE_DEFAULT_RADIAL_SEGMENTS);
+  const geo = buildTaperedTubeGeometry(entry.splinePoints, root, tip, segs);
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = geo;
+  entry.kind = 'tube';
+  entry.tubeRootRadius = root;
+  entry.tubeTipRadius = tip;
+  entry.tubeRadialSegments = segs;
+  if (splineEditingId === entry.id) stopSplinePointEdit();
+  renderLayerList();
+  updateHandles(entry.id);
+}
+const tubeApplyBtn = document.getElementById('tubeApplyBtn');
+if (tubeApplyBtn) tubeApplyBtn.addEventListener('click', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  applyTube(entry, TUBE_DEFAULT_ROOT_RADIUS, TUBE_DEFAULT_TIP_RADIUS, TUBE_DEFAULT_RADIAL_SEGMENTS);
+  selectObject(selectedId); // refresca Atributos: ahora es 'tube', no 'spline'
+  pushHistory();
+});
+
+// =====================================================================
+// GENERADOR: EXTRUSION -- toma una curva CERRADA (dibujada plana, en
+// cualquiera de las 3 vistas ortogonales: Frente, Izquierda o Arriba) y le
+// da volumen empujandola derecho hacia adelante, igual que el modificador
+// "Extrude" de Cinema4D/Blender: sirve para letras, logos, llaveros,
+// estrellas, cualquier forma plana recortada con espesor.
+// Como la curva puede haberse dibujado en cualquiera de las 3 vistas, se
+// detecta sola cual de los 3 ejes (x/y/z) quedo practicamente constante
+// (la "profundidad" de esa vista) -- los otros dos ejes son la forma en 2D,
+// y la extrusion avanza sobre el eje detectado. Mismo truco de
+// "no importa la vista" que ya usa latheProfileFromPoints.
+// =====================================================================
+function extrudeProfileFromPoints(points) {
+  const xs = points.map(p => p.x), ys = points.map(p => p.y), zs = points.map(p => p.z);
+  const rangeX = Math.max(...xs) - Math.min(...xs);
+  const rangeY = Math.max(...ys) - Math.min(...ys);
+  const rangeZ = Math.max(...zs) - Math.min(...zs);
+  const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+
+  let axis, flatValue, shape2D;
+  if (rangeX <= rangeY && rangeX <= rangeZ) {
+    axis = 'x'; flatValue = avg(xs);
+    shape2D = points.map(p => new THREE.Vector2(-p.z, p.y)); // vista Izquierda
+  } else if (rangeY <= rangeX && rangeY <= rangeZ) {
+    axis = 'y'; flatValue = avg(ys);
+    shape2D = points.map(p => new THREE.Vector2(p.x, -p.z)); // vista Arriba
+  } else {
+    axis = 'z'; flatValue = avg(zs);
+    shape2D = points.map(p => new THREE.Vector2(p.x, p.y)); // vista Frente
+  }
+
+  // Suaviza el contorno CERRADO (mismo estilo Catmull-Rom que ya usa el
+  // resto del Spline) antes de armar la forma, para que no salga poligonal.
+  const vec3ForCurve = shape2D.map(v => new THREE.Vector3(v.x, v.y, 0));
+  const closedCurve = new THREE.CatmullRomCurve3(vec3ForCurve, true);
+  const smoothCount = Math.max(24, shape2D.length * 8);
+  const points2D = closedCurve.getSpacedPoints(smoothCount).map(v => new THREE.Vector2(v.x, v.y));
+  return { axis, flatValue, points2D };
+}
+
+function applyExtrude(entry, depth, bevelEnabled, bevelSize) {
+  // Igual que applyLathe/applyTube: acepta 'spline' (primera vez) o
+  // 'extrude' (cuando los deslizadores de Atributos la regeneran en vivo).
+  if (!entry || (entry.kind !== 'spline' && entry.kind !== 'extrude') || !entry.splinePoints || entry.splinePoints.length < 3) return;
+  const d = depth != null ? depth : (entry.extrudeDepth != null ? entry.extrudeDepth : EXTRUDE_DEFAULT_DEPTH);
+  const bevel = bevelEnabled != null ? bevelEnabled : (entry.extrudeBevel != null ? entry.extrudeBevel : false);
+  const bsize = bevelSize != null ? bevelSize : (entry.extrudeBevelSize != null ? entry.extrudeBevelSize : EXTRUDE_DEFAULT_BEVEL_SIZE);
+  const profile = extrudeProfileFromPoints(entry.splinePoints);
+
+  const shape = new THREE.Shape();
+  profile.points2D.forEach((p, i) => { if (i === 0) shape.moveTo(p.x, p.y); else shape.lineTo(p.x, p.y); });
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: d, bevelEnabled: bevel, bevelThickness: bevel ? bsize : 0, bevelSize: bevel ? bsize : 0, bevelSegments: 3, curveSegments: 12
+  });
+  // La extrusion sale siempre sobre el eje local Z (0..depth) -- se rota
+  // para que ese eje coincida con el eje real detectado (x/y/z), y se
+  // centra sobre el valor original de ese eje para que quede en el mismo
+  // lugar donde se dibujo la curva, no pegada a un costado.
+  if (profile.axis === 'x') { geo.rotateY(Math.PI / 2); geo.translate(profile.flatValue - d / 2, 0, 0); }
+  else if (profile.axis === 'y') { geo.rotateX(-Math.PI / 2); geo.translate(0, profile.flatValue - d / 2, 0); }
+  else { geo.translate(0, 0, profile.flatValue - d / 2); }
+  geo.computeVertexNormals();
+
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = geo;
+  entry.mesh.material.side = THREE.FrontSide;
+  entry.kind = 'extrude';
+  entry.extrudeDepth = d;
+  entry.extrudeBevel = bevel;
+  entry.extrudeBevelSize = bsize;
+  if (splineEditingId === entry.id) stopSplinePointEdit();
+  renderLayerList();
+  updateHandles(entry.id);
+}
+const extrudeApplyBtn = document.getElementById('extrudeApplyBtn');
+if (extrudeApplyBtn) extrudeApplyBtn.addEventListener('click', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (entry && entry.splinePoints && entry.splinePoints.length < 3) {
+    alert('Hacen falta al menos 3 puntos para cerrar la forma y darle volumen con Extrusión.');
+    return;
+  }
+  applyExtrude(entry, EXTRUDE_DEFAULT_DEPTH, false, EXTRUDE_DEFAULT_BEVEL_SIZE);
+  selectObject(selectedId); // refresca Atributos: ahora es 'extrude', no 'spline'
+  pushHistory();
+});
+
 // Interacción de Tiradores Directos (Push-Pull Handles)
 wrap.addEventListener('pointerdown', (e) => {
   if (handleGroup.visible && selectedId != null && !transform.dragging && toolMode !== 'sculpt' && toolMode !== 'hair') {
@@ -2786,6 +3536,10 @@ window.addEventListener('pointermove', (e) => {
     onHandleDrag(e.clientX, e.clientY);
     return;
   }
+  if (splineDragging) {
+    onSplinePointDrag(e.clientX, e.clientY);
+    return;
+  }
   if (!hairDragging && !sculptDragging && handleGroup.visible && selectedId != null) {
     const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
     pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -2806,6 +3560,9 @@ window.addEventListener('pointermove', (e) => {
 window.addEventListener('pointerup', () => {
   if (isDraggingHandle) {
     stopHandleDrag();
+  }
+  if (splineDragging) {
+    stopSplinePointDrag();
   }
   if (!hairDragging) return;
   hairDragging = false;
@@ -3017,7 +3774,7 @@ if (hairTipRadiusInput) {
 
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (transform.dragging) return;
-  if (toolMode === 'hair') return; // en modo Pelo, tocar dibuja -- no selecciona
+  if (toolMode === 'hair' || toolMode === 'spline') return; // en modo Pelo/Curva, tocar dibuja -- no selecciona
   onPick(e.clientX, e.clientY);
 });
 
@@ -3052,7 +3809,8 @@ const MODE_NAMES = {
   rotate: 'Rotar (R)',
   scale: 'Escalar (S)',
   sculpt: 'Esculpir (Pincel)',
-  hair: 'Dibujar Pelo'
+  hair: 'Dibujar Pelo',
+  spline: 'Curva / Spline'
 };
 
 function syncCanvasTop() {
@@ -3060,6 +3818,15 @@ function syncCanvasTop() {
 }
 
 function setMode(mode) {
+  const prevMode = toolMode;
+  if (prevMode === 'spline' && mode !== 'spline') {
+    // Salir del modo Curva sin terminarla: se descarta el trazo a medio
+    // hacer (si habia uno) y se esconden las bolitas de edicion -- igual
+    // que Esculpir/Pelo no dejan un pincel "a medio pasar" prendido.
+    clearSplinePreview();
+    splinePoints = [];
+    stopSplinePointEdit();
+  }
   toolMode = mode;
   modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   if (statusInfo) statusInfo.textContent = `Editor 3D - Modo ${MODE_NAMES[mode] || mode}`;
@@ -3068,12 +3835,25 @@ function setMode(mode) {
     transform.detach();
     brushRow.style.display = 'flex';
     if (hairRow) hairRow.style.display = 'none';
+    if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'none';
   } else if (mode === 'hair') {
     transform.detach();
     brushRow.style.display = 'none';
     if (hairRow) hairRow.style.display = 'flex';
+    if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'none';
+  } else if (mode === 'spline') {
+    transform.detach();
+    brushRow.style.display = 'none';
+    if (hairRow) hairRow.style.display = 'none';
+    if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'flex';
+    if (defaultToolOptions) defaultToolOptions.style.display = 'none';
+    // Si ya hay una Curva seleccionada, entrar directo a editar sus puntos.
+    if (selectedId != null) {
+      const entry = sceneObjects.get(selectedId);
+      if (entry && entry.kind === 'spline') startSplinePointEdit(selectedId);
+    }
   } else if (mode === 'scale') {
     // Los tiradores directos (con mm e iman) son el unico control de
     // escalar ahora -- se apaga el gizmo clasico para que no queden los
@@ -3081,10 +3861,12 @@ function setMode(mode) {
     transform.detach();
     brushRow.style.display = 'none';
     if (hairRow) hairRow.style.display = 'none';
+    if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
   } else {
     brushRow.style.display = 'none';
     if (hairRow) hairRow.style.display = 'none';
+    if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'none';
     if (defaultToolOptions) defaultToolOptions.style.display = 'flex';
     transform.setMode(mode);
     if (selectedId != null) {
@@ -3420,6 +4202,7 @@ function animate() {
 }
 animate();
 
+
 syncCanvasTop(); // deja el alto del canvas acorde a la barra de arriba (2 o 3 filas) y los limites de orthoCam listos
 setView('perspective');
 pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el principio
@@ -3484,11 +4267,11 @@ function cloneEntryAt(src, positionWorld) {
     opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
-  if (src.kind === 'hair') extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  if (isCustomGeomKind(src.kind)) extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
   const built = buildObject(src.kind, colorHex, extraOpts);
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
-  if (src.kind !== 'hair') copySculptIfAny(src, built.node);
+  if (!isCustomGeomKind(src.kind)) copySculptIfAny(src, built.node);
   built.node.position.copy(positionWorld);
   scene.add(built.node);
   const newId = objIdCounter++;
@@ -3751,12 +4534,12 @@ function cloneEntryByEntry(src) {
     opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
-  if (src.kind === 'hair') opts.geometryData = serializeGeometry(src.mesh.geometry);
+  if (isCustomGeomKind(src.kind)) opts.geometryData = serializeGeometry(src.mesh.geometry);
   const built = buildObject(src.kind, colorHex, opts);
   built.node.position.copy(src.mesh.position);
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);
-  if (src.kind !== 'hair') copySculptIfAny(src, built.node);
+  if (!isCustomGeomKind(src.kind)) copySculptIfAny(src, built.node);
   const parentEntry = src.parentId != null ? sceneObjects.get(src.parentId) : null;
   if (parentEntry) { parentEntry.mesh.attach(built.node); } else { scene.add(built.node); }
   const newId = objIdCounter++;
@@ -3802,7 +4585,7 @@ const partsListCloseBtn = document.getElementById('partsListCloseBtn');
 function buildPartsList() {
   const rows = [];
   sceneObjects.forEach(entry => {
-    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair') return;
+    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair' || entry.kind === 'spline') return;
     if (!entry.mesh.geometry) return;
     entry.mesh.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(entry.mesh);
@@ -3852,7 +4635,7 @@ function exportSceneAsOBJ() {
   let objStr = '# Exportado desde 3DPro\n\n';
   let vOffset = 1;
   sceneObjects.forEach(entry => {
-    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair') return;
+    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair' || entry.kind === 'spline') return;
     if (!entry.mesh.geometry) return;
     const objName = (entry.name || KIND_LABEL[entry.kind] || entry.kind).replace(/\s+/g, '_');
     objStr += `o ${objName}\n`;
