@@ -355,7 +355,12 @@ function removeObject(id) {
       child.parentId = null;
     }
   });
-  scene.remove(entry.mesh);
+  // Igual que en updateClonerLive(): si esta figura esta adentro de un
+  // grupo/Nulo/clonador, su padre real no es "scene" -- "scene.remove()"
+  // no la encuentra ahi y no hace nada, dejandola visible para siempre
+  // aunque ya se haya borrado del panel. "removeFromParent()" la saca de
+  // donde este colgada de verdad.
+  entry.mesh.removeFromParent();
   disposeEntry(entry);
   sceneObjects.delete(id);
   if (selectedId === id) selectObject(null);
@@ -1686,7 +1691,19 @@ function updateClonerLive(clonerEntry) {
     clonerEntry.clonerChildIds.forEach(cid => {
       const e = sceneObjects.get(cid);
       if (e) {
-        scene.remove(e.mesh);
+        // OJO: estas copias NO son hijas directas de "scene" -- son hijas
+        // del Nulo del clonador (clonerEntry.mesh), por eso "scene.remove()"
+        // no hacia nada (silenciosamente, sin error): buscaba la copia entre
+        // los hijos de scene, no la encontraba ahi, y no la sacaba de donde
+        // realmente estaba. Asi, cada vez que se reconstruia el clonador
+        // (bajar la cantidad, cambiar separacion o radio, cambiar de modo),
+        // las copias "viejas" se borraban del Map de sceneObjects pero
+        // seguian colgadas del Nulo y se seguian viendo en pantalla para
+        // siempre -- se iban acumulando en vez de reemplazarse.
+        // "removeFromParent()" saca al mesh de CUALQUIER padre que tenga
+        // en ese momento (el Nulo, en este caso), asi que arregla esto sin
+        // importar donde este colgado.
+        e.mesh.removeFromParent();
         disposeEntry(e);
         sceneObjects.delete(cid);
       }
