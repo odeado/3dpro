@@ -305,6 +305,37 @@ function buildTaperedTubeGeometry(points, rootRadius, tipRadius, radialSegments 
   return geo;
 }
 
+// Una Curva/Spline TODAVIA SIN CONVERTIR no es una figura solida de verdad
+// -- es solo una guia, igual que en Cinema4D/Blender se ve como una linea
+// finita, no como un tubo grueso. Esta funcion arma esa geometria de linea
+// (suavizada con el mismo Catmull-Rom que ya usa el resto del Spline);
+// "closed" la cierra en loop (para poder usarla con el generador de
+// Extrusion). Se usa tanto para el trazo en construccion como para el
+// objeto 'spline' ya terminado -- y se vuelve a llamar cada vez que se
+// arrastra/agrega/saca un punto.
+function buildSplineLineGeometry(points, closed) {
+  if (!points || points.length < 2) {
+    const pts = points && points.length === 1 ? [points[0].clone(), points[0].clone()] : [];
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+  const curve = new THREE.CatmullRomCurve3(points, !!closed);
+  const count = Math.max(24, points.length * 8);
+  const spaced = curve.getSpacedPoints(count);
+  // Cierra el loop dibujando de vuelta hasta el primer punto -- asi no hace
+  // falta un THREE.LineLoop aparte (que obligaria a recrear el objeto cada
+  // vez que se prende/apaga "Cerrar Curva"), un THREE.Line comun alcanza.
+  if (closed) spaced.push(spaced[0].clone());
+  return new THREE.BufferGeometry().setFromPoints(spaced);
+}
+
+// Crea el objeto THREE.Line de una Curva a partir de su geometria ya armada
+// -- centraliza el material para que el trazo en construccion, el objeto
+// terminado y la reconstruccion al deshacer/clonar se vean siempre igual.
+function buildSplineLineObject(geo, colorHex) {
+  const mat = new THREE.LineBasicMaterial({ color: colorHex != null ? colorHex : SPLINE_DEFAULT_COLOR });
+  return new THREE.Line(geo, mat);
+}
+
 // Un Pelo no tiene una "forma de fabrica" como un cubo o una esfera -- su
 // geometria sale entera del trazo dibujado. Para poder reconstruirlo (al
 // deshacer/rehacer, abrir un proyecto guardado, o clonarlo) se guarda/
@@ -313,7 +344,10 @@ function buildTaperedTubeGeometry(points, rootRadius, tipRadius, radialSegments 
 function serializeGeometry(geo) {
   return {
     position: Array.from(geo.attributes.position.array),
-    normal: Array.from(geo.attributes.normal.array),
+    // Una Curva/Spline sin convertir se ve ahora como THREE.Line/LineLoop --
+    // esa geometria solo tiene atributo "position" (sin normal/uv), a
+    // diferencia de un solido de verdad. Se guarda null en ese caso.
+    normal: geo.attributes.normal ? Array.from(geo.attributes.normal.array) : null,
     uv: geo.attributes.uv ? Array.from(geo.attributes.uv.array) : null,
     index: geo.index ? Array.from(geo.index.array) : null
   };
@@ -322,7 +356,7 @@ function serializeGeometry(geo) {
 function geometryFromSerialized(data) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
-  geo.setAttribute('normal', new THREE.Float32BufferAttribute(data.normal, 3));
+  if (data.normal) geo.setAttribute('normal', new THREE.Float32BufferAttribute(data.normal, 3));
   if (data.uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(data.uv, 2));
   if (data.index) geo.setIndex(data.index);
   geo.computeBoundingSphere();
@@ -363,6 +397,15 @@ function buildObject(kind, colorHex, extra) {
   const metalness = (extra && extra.metalness != null) ? extra.metalness : 0.05;
   const opacity = (extra && extra.opacity != null) ? extra.opacity : 1.0;
   const wireframe = (extra && extra.wireframe != null) ? !!extra.wireframe : false;
+
+  if (kind === 'spline') {
+    // Una Curva sin convertir todavia no es un solido -- se ve como una
+    // linea fina (THREE.Line), no como una malla con caras. El estado
+    // "cerrada" ya viene horneado en la geometria guardada/serializada.
+    const geo = extra && extra.geometryData ? geometryFromSerialized(extra.geometryData) : new THREE.BufferGeometry();
+    const line = buildSplineLineObject(geo, colorHex);
+    return { node: line, pickMesh: line };
+  }
 
   if (isCustomGeomKind(kind)) {
     const geo = extra && extra.geometryData ? geometryFromSerialized(extra.geometryData) : new THREE.BufferGeometry();
@@ -509,6 +552,7 @@ function cloneObject(id) {
   if (isCustomGeomKind(src.kind)) {
     extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
   }
+  if (src.kind === 'spline') extraOpts.closed = !!src.closed;
   const built = buildObject(src.kind, colorHex, extraOpts);
   built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
   built.node.rotation.copy(src.mesh.rotation);
@@ -517,7 +561,7 @@ function cloneObject(id) {
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, closed: !!src.closed, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -871,7 +915,11 @@ transform.addEventListener('objectChange', () => {
 // repetir "transform.attach(...)" suelto en cada lugar que puede cambiar
 // la seleccion o el modo.
 function syncTransformGizmo(entry) {
-  if (entry && toolMode !== 'sculpt' && toolMode !== 'hair' && toolMode !== 'scale') {
+  // En modo Curva el gizmo clasico (flechas de mover) no tiene sentido --
+  // ahi se arrastran las bolitas de los puntos, no el objeto entero -- y
+  // mostrarlo de encima solo ensucia la vista (se superponia con las
+  // bolitas y la guia del eje). Mismo criterio que ya usan Esculpir/Pelo.
+  if (entry && toolMode !== 'sculpt' && toolMode !== 'hair' && toolMode !== 'scale' && toolMode !== 'spline') {
     transform.attach(entry.mesh);
   } else {
     transform.detach();
@@ -1049,9 +1097,11 @@ function selectObject(id) {
     }
 
     // Si estamos en modo Curva, mostrar/ocultar las bolitas de edicion de
-    // puntos segun si lo seleccionado es o no un Spline sin convertir.
+    // puntos segun si lo seleccionado tiene puntos editables -- una Curva
+    // sin convertir, o una ya convertida en Revolucion/Tubo/Extrusion (se
+    // puede volver a entrar a ajustarla en cualquier momento).
     if (toolMode === 'spline') {
-      if (entry.kind === 'spline') startSplinePointEdit(id);
+      if (canEditSplinePoints(entry)) startSplinePointEdit(id);
       else stopSplinePointEdit();
     }
 
@@ -2617,6 +2667,7 @@ function snapshotScene() {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
       if (e.splinePoints) {
         s.splinePoints = e.splinePoints.map(p => [p.x, p.y, p.z]);
+        s.closed = !!e.closed;
         s.latheSegments = e.latheSegments != null ? e.latheSegments : null;
         s.tubeRootRadius = e.tubeRootRadius != null ? e.tubeRootRadius : null;
         s.tubeTipRadius = e.tubeTipRadius != null ? e.tubeTipRadius : null;
@@ -2656,7 +2707,8 @@ function rebuildSceneFrom(snap) {
       metalness: s.metalness,
       opacity: s.opacity,
       wireframe: s.wireframe,
-      geometryData: s.hairGeometry
+      geometryData: s.hairGeometry,
+      closed: !!s.closed
     };
     const built = buildObject(s.kind, s.color != null ? s.color : undefined, extraOpts);
     built.node.position.set(s.px, s.py, s.pz);
@@ -2688,6 +2740,7 @@ function rebuildSceneFrom(snap) {
       symAxis: s.symAxis, symOffset: s.symOffset,
       isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
       splinePoints: s.splinePoints ? s.splinePoints.map(a => new THREE.Vector3(a[0], a[1], a[2])) : undefined,
+      closed: !!s.closed,
       latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
       tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
       tubeTipRadius: s.tubeTipRadius != null ? s.tubeTipRadius : undefined,
@@ -3000,6 +3053,7 @@ document.querySelectorAll('.abtn').forEach(btn => {
 
 // --- Selección por toque/click en el canvas ---
 const raycaster = new THREE.Raycaster();
+raycaster.params.Line.threshold = 6; // las Curvas/Splines ahora se ven como una linea fina -- sin esto serian casi imposibles de tocar con el dedo
 const pointer = new THREE.Vector2();
 
 function onPick(clientX, clientY) {
@@ -3147,14 +3201,83 @@ function finishHairStroke() {
 // =====================================================================
 let splinePoints = [];      // world-space, curva EN CONSTRUCCION (antes de "Finalizar Curva")
 let splinePreviewMesh = null;
-let splineEditingId = null; // id del objeto 'spline' cuyos puntos se estan mostrando/editando ahora
+let splineEditingId = null; // id del objeto (spline/lathe/tube/extrude) cuyos puntos se estan mostrando/editando ahora
 const splinePointGroup = new THREE.Group();
 scene.add(splinePointGroup);
 let splinePointMeshes = [];
+
+// Guia del eje de Revolucion: una linea vertical punteada en X=0,Z=0 (con
+// una flechita en cada punta, como en Cinema4D) para que se entienda de un
+// vistazo "donde esta la mitad" al dibujar el perfil de una copa/florero --
+// la distancia de cada punto a ESTA linea es lo que despues se vuelve el
+// radio al aplicar Revolucion. Solo se muestra en modo Curva.
+const axisGuideGroup = new THREE.Group();
+axisGuideGroup.visible = false;
+scene.add(axisGuideGroup);
+(function buildAxisGuide() {
+  const H = 220;
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -H, 0), new THREE.Vector3(0, H, 0)]);
+  const lineMat = new THREE.LineDashedMaterial({ color: 0xffb020, dashSize: 8, gapSize: 5, transparent: true, opacity: 0.85 });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.computeLineDistances();
+  axisGuideGroup.add(line);
+  const arrowMat = new THREE.MeshBasicMaterial({ color: 0xffb020 });
+  const arrowTop = new THREE.Mesh(new THREE.ConeGeometry(4.5, 14, 10), arrowMat);
+  arrowTop.position.set(0, H, 0);
+  axisGuideGroup.add(arrowTop);
+  const arrowBottom = new THREE.Mesh(new THREE.ConeGeometry(4.5, 14, 10), arrowMat);
+  arrowBottom.position.set(0, -H, 0);
+  arrowBottom.rotation.x = Math.PI;
+  axisGuideGroup.add(arrowBottom);
+})();
+function updateAxisGuideVisibility() {
+  axisGuideGroup.visible = (toolMode === 'spline');
+}
 let draggingSplinePointIndex = -1;
 const splineFinishBtn = document.getElementById('splineFinishBtn');
 const splinePointCountEl = document.getElementById('splinePointCount');
 const latheApplyBtn = document.getElementById('latheApplyBtn');
+
+// Una vez que se le aplico un generador (Revolucion/Tubo/Extrusion) a una
+// Curva, sigue guardando sus puntos editables -- por eso se puede volver a
+// entrar a tocarlos despues, no solo mientras todavia es un 'spline' sin
+// convertir. La linea guia en si (kind 'spline') tambien se puede reeditar,
+// claro.
+function canEditSplinePoints(entry) {
+  return !!(entry && entry.splinePoints && (entry.kind === 'spline' || entry.kind === 'lathe' || entry.kind === 'tube' || entry.kind === 'extrude'));
+}
+
+// La primera vez que se le aplica un generador a una Curva sin convertir,
+// su objeto en escena pasa de ser una THREE.Line/LineLoop (la guia fina)
+// a necesitar una THREE.Mesh de verdad (con caras, para poder rellenarse
+// de solido) -- esta funcion hace ese cambio de "tipo" una sola vez,
+// conservando posicion/rotacion/escala y el id del objeto. Si ya es un
+// Mesh (porque el generador se esta volviendo a aplicar en vivo, p.ej. al
+// arrastrar un punto de una Revolucion ya convertida), no hace nada.
+function ensureSolidMeshForGenerator(entry) {
+  if (entry.mesh.isMesh) return;
+  const oldMesh = entry.mesh;
+  const wasEditingTransform = (transform.object === oldMesh);
+  const mesh = new THREE.Mesh(
+    new THREE.BufferGeometry(),
+    new THREE.MeshStandardMaterial({
+      color: (oldMesh.material && oldMesh.material.color) ? oldMesh.material.color.getHex() : SPLINE_DEFAULT_COLOR,
+      roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide
+    })
+  );
+  mesh.position.copy(oldMesh.position);
+  mesh.quaternion.copy(oldMesh.quaternion);
+  mesh.scale.copy(oldMesh.scale);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData.ownerId = entry.id;
+  if (wasEditingTransform) transform.detach();
+  scene.add(mesh);
+  scene.remove(oldMesh);
+  oldMesh.geometry.dispose();
+  if (oldMesh.material) oldMesh.material.dispose();
+  entry.mesh = mesh;
+  entry.pickMesh = mesh;
+}
 
 function clearSplinePreview() {
   if (!splinePreviewMesh) return;
@@ -3164,12 +3287,18 @@ function clearSplinePreview() {
   splinePreviewMesh = null;
 }
 
+// Si esta prendido "Cerrar Curva" mientras se dibuja el trazo nuevo (antes
+// de "Finalizar Curva"), la vista previa ya se ve como loop cerrado -- se
+// resetea cada vez que se arranca un trazo nuevo.
+let splineDraftClosed = false;
+const splineClosedCheck = document.getElementById('splineClosedCheck');
+
 function updateSplinePreview() {
   if (splinePointCountEl) splinePointCountEl.textContent = splinePoints.length + ' punto' + (splinePoints.length === 1 ? '' : 's');
   if (splinePoints.length < 2) return;
-  const geo = buildTaperedTubeGeometry(splinePoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
+  const geo = buildSplineLineGeometry(splinePoints, splineDraftClosed);
   if (!splinePreviewMesh) {
-    splinePreviewMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: SPLINE_DEFAULT_COLOR, roughness: 0.4, side: THREE.DoubleSide, transparent: true, opacity: 0.85 }));
+    splinePreviewMesh = buildSplineLineObject(geo, SPLINE_DEFAULT_COLOR);
     scene.add(splinePreviewMesh);
   } else {
     splinePreviewMesh.geometry.dispose();
@@ -3177,26 +3306,26 @@ function updateSplinePreview() {
   }
 }
 
-function createSplineObjectFromPoints(pts) {
+function createSplineObjectFromPoints(pts, closed) {
   const origin = pts[0].clone();
   const localPoints = pts.map(p => p.clone().sub(origin));
-  const geo = buildTaperedTubeGeometry(localPoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
-  const mat = new THREE.MeshStandardMaterial({ color: SPLINE_DEFAULT_COLOR, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true; mesh.receiveShadow = true;
+  const geo = buildSplineLineGeometry(localPoints, closed);
+  const mesh = buildSplineLineObject(geo, SPLINE_DEFAULT_COLOR);
   mesh.position.copy(origin);
   scene.add(mesh);
   const id = objIdCounter++;
   mesh.userData.ownerId = id;
-  sceneObjects.set(id, { id, kind: 'spline', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false, splinePoints: localPoints });
+  sceneObjects.set(id, { id, kind: 'spline', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false, splinePoints: localPoints, closed: !!closed });
   return id;
 }
 
 function finishSplineDraw() {
   clearSplinePreview();
-  if (splinePoints.length < 2) { splinePoints = []; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
-  const id = createSplineObjectFromPoints(splinePoints);
+  if (splinePoints.length < 2) { splinePoints = []; splineDraftClosed = false; if (splineClosedCheck) splineClosedCheck.checked = false; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
+  const id = createSplineObjectFromPoints(splinePoints, splineDraftClosed);
   splinePoints = [];
+  splineDraftClosed = false;
+  if (splineClosedCheck) splineClosedCheck.checked = false;
   if (splinePointCountEl) splinePointCountEl.textContent = '';
   renderLayerList();
   selectObject(id);
@@ -3205,7 +3334,8 @@ function finishSplineDraw() {
 }
 if (splineFinishBtn) splineFinishBtn.addEventListener('click', finishSplineDraw);
 
-// --- Edicion de los puntos de un Spline ya creado ---
+// --- Edicion de los puntos de un Spline ya creado (o de una Revolucion/
+// Tubo/Extrusion generados a partir de uno) ---
 function clearSplinePointHandles() {
   splinePointMeshes.forEach(m => { splinePointGroup.remove(m); m.geometry.dispose(); m.material.dispose(); });
   splinePointMeshes = [];
@@ -3215,7 +3345,7 @@ function refreshSplinePointHandles() {
   clearSplinePointHandles();
   if (splineEditingId == null) return;
   const entry = sceneObjects.get(splineEditingId);
-  if (!entry || entry.kind !== 'spline' || !entry.splinePoints) { splineEditingId = null; return; }
+  if (!canEditSplinePoints(entry)) { splineEditingId = null; return; }
   entry.mesh.updateMatrixWorld(true);
   entry.splinePoints.forEach((p, i) => {
     const world = p.clone().applyMatrix4(entry.mesh.matrixWorld);
@@ -3234,17 +3364,69 @@ function refreshSplinePointHandles() {
 function startSplinePointEdit(id) {
   splineEditingId = id;
   refreshSplinePointHandles();
+  syncSplineClosedCheckbox();
 }
 
 function stopSplinePointEdit() {
   splineEditingId = null;
   clearSplinePointHandles();
+  syncSplineClosedCheckbox();
 }
 
+// El toggle "🔒 Cerrar Curva" refleja/edita distintas cosas segun el
+// contexto: el trazo NUEVO en construccion (splineDraftClosed), una Curva
+// ya creada sin convertir todavia (entry.closed), o queda deshabilitado
+// si se estan editando los puntos de una Revolucion/Tubo/Extrusion ya
+// generados (ahi "cerrar" ya no tiene efecto -- el generador ya decidio
+// eso al convertir la curva).
+function syncSplineClosedCheckbox() {
+  if (!splineClosedCheck) return;
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (entry && entry.kind === 'spline') {
+      splineClosedCheck.disabled = false;
+      splineClosedCheck.checked = !!entry.closed;
+      return;
+    }
+    splineClosedCheck.disabled = true;
+    splineClosedCheck.checked = false;
+    return;
+  }
+  splineClosedCheck.disabled = false;
+  splineClosedCheck.checked = splineDraftClosed;
+}
+if (splineClosedCheck) splineClosedCheck.addEventListener('change', () => {
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (entry && entry.kind === 'spline') {
+      entry.closed = splineClosedCheck.checked;
+      rebuildSplineGeometry(entry);
+      pushHistory();
+      return;
+    }
+  }
+  splineDraftClosed = splineClosedCheck.checked;
+  updateSplinePreview();
+});
+
+// Solo tiene sentido para una curva TODAVIA SIN CONVERTIR (kind 'spline'):
+// vuelve a armar su linea guia. Si ya se le aplico un generador, hay que
+// rehacer ESE generador en cambio -- ver regenerateEntryFromPoints().
 function rebuildSplineGeometry(entry) {
-  const geo = buildTaperedTubeGeometry(entry.splinePoints, SPLINE_PREVIEW_RADIUS, SPLINE_PREVIEW_RADIUS);
+  const geo = buildSplineLineGeometry(entry.splinePoints, entry.closed);
   entry.mesh.geometry.dispose();
   entry.mesh.geometry = geo;
+}
+
+// Punto unico por el que pasan drag/agregar/sacar un punto: si la curva ya
+// es una Revolucion/Tubo/Extrusion, hay que volver a correr ESE generador
+// (con los mismos parametros que ya tenia) para que el solido seonga al
+// dia; si todavia es una guia sin convertir, alcanza con rehacer la linea.
+function regenerateEntryFromPoints(entry) {
+  if (entry.kind === 'lathe') { applyLathe(entry, entry.latheSegments); return; }
+  if (entry.kind === 'tube') { applyTube(entry, entry.tubeRootRadius, entry.tubeTipRadius, entry.tubeRadialSegments); return; }
+  if (entry.kind === 'extrude') { applyExtrude(entry, entry.extrudeDepth, entry.extrudeBevel, entry.extrudeBevelSize); return; }
+  rebuildSplineGeometry(entry);
 }
 
 let splineDragging = false;
@@ -3261,7 +3443,7 @@ function onSplinePointDrag(clientX, clientY) {
   const worldPoint = nextHairPoint(clientX, clientY); // reusa el mismo raycast que ya usa Pelo (pega en superficies, o en un plano de referencia si no hay nada)
   const local = entry.mesh.worldToLocal(worldPoint.clone());
   entry.splinePoints[draggingSplinePointIndex].copy(local);
-  rebuildSplineGeometry(entry);
+  regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
 }
 
@@ -3276,7 +3458,7 @@ function stopSplinePointDrag() {
 function removeSplinePointAt(entry, index) {
   if (entry.splinePoints.length <= 2) return; // no dejar una curva con menos de 2 puntos
   entry.splinePoints.splice(index, 1);
-  rebuildSplineGeometry(entry);
+  regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
   pushHistory();
 }
@@ -3310,7 +3492,7 @@ function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
   const worldPoint = nextHairPoint(clientX, clientY);
   const local = entry.mesh.worldToLocal(worldPoint.clone());
   entry.splinePoints.push(local);
-  rebuildSplineGeometry(entry);
+  regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
   pushHistory();
 }
@@ -3359,6 +3541,7 @@ function applyLathe(entry, segments) {
   // el slider de "Segmentos" en Atributos la vuelve a generar en vivo con
   // otro valor) -- ambas conservan splinePoints para poder rehacerla.
   if (!entry || (entry.kind !== 'spline' && entry.kind !== 'lathe') || !entry.splinePoints || entry.splinePoints.length < 2) return;
+  ensureSolidMeshForGenerator(entry);
   const segs = segments != null ? segments : (entry.latheSegments || 32);
   const profile = latheProfileFromPoints(entry.splinePoints);
   const geo = new THREE.LatheGeometry(profile, segs);
@@ -3368,7 +3551,6 @@ function applyLathe(entry, segments) {
   entry.mesh.material.side = THREE.FrontSide;
   entry.kind = 'lathe';
   entry.latheSegments = segs;
-  if (splineEditingId === entry.id) stopSplinePointEdit();
   renderLayerList();
   updateHandles(entry.id);
 }
@@ -3396,6 +3578,7 @@ function applyTube(entry, rootRadius, tipRadius, radialSegments) {
   // cuando los deslizadores de Atributos la regeneran en vivo con otro
   // grosor/segmentos) -- ambas conservan splinePoints para poder rehacerla.
   if (!entry || (entry.kind !== 'spline' && entry.kind !== 'tube') || !entry.splinePoints || entry.splinePoints.length < 2) return;
+  ensureSolidMeshForGenerator(entry);
   const root = rootRadius != null ? rootRadius : (entry.tubeRootRadius != null ? entry.tubeRootRadius : TUBE_DEFAULT_ROOT_RADIUS);
   const tip = tipRadius != null ? tipRadius : (entry.tubeTipRadius != null ? entry.tubeTipRadius : TUBE_DEFAULT_TIP_RADIUS);
   const segs = radialSegments != null ? radialSegments : (entry.tubeRadialSegments || TUBE_DEFAULT_RADIAL_SEGMENTS);
@@ -3406,7 +3589,6 @@ function applyTube(entry, rootRadius, tipRadius, radialSegments) {
   entry.tubeRootRadius = root;
   entry.tubeTipRadius = tip;
   entry.tubeRadialSegments = segs;
-  if (splineEditingId === entry.id) stopSplinePointEdit();
   renderLayerList();
   updateHandles(entry.id);
 }
@@ -3463,6 +3645,7 @@ function applyExtrude(entry, depth, bevelEnabled, bevelSize) {
   // Igual que applyLathe/applyTube: acepta 'spline' (primera vez) o
   // 'extrude' (cuando los deslizadores de Atributos la regeneran en vivo).
   if (!entry || (entry.kind !== 'spline' && entry.kind !== 'extrude') || !entry.splinePoints || entry.splinePoints.length < 3) return;
+  ensureSolidMeshForGenerator(entry);
   const d = depth != null ? depth : (entry.extrudeDepth != null ? entry.extrudeDepth : EXTRUDE_DEFAULT_DEPTH);
   const bevel = bevelEnabled != null ? bevelEnabled : (entry.extrudeBevel != null ? entry.extrudeBevel : false);
   const bsize = bevelSize != null ? bevelSize : (entry.extrudeBevelSize != null ? entry.extrudeBevelSize : EXTRUDE_DEFAULT_BEVEL_SIZE);
@@ -3489,7 +3672,6 @@ function applyExtrude(entry, depth, bevelEnabled, bevelSize) {
   entry.extrudeDepth = d;
   entry.extrudeBevel = bevel;
   entry.extrudeBevelSize = bsize;
-  if (splineEditingId === entry.id) stopSplinePointEdit();
   renderLayerList();
   updateHandles(entry.id);
 }
@@ -3849,10 +4031,14 @@ function setMode(mode) {
     if (hairRow) hairRow.style.display = 'none';
     if (splineFinishBtn) splineFinishBtn.parentElement.style.display = 'flex';
     if (defaultToolOptions) defaultToolOptions.style.display = 'none';
-    // Si ya hay una Curva seleccionada, entrar directo a editar sus puntos.
+    // Si ya hay una Curva (o una Revolucion/Tubo/Extrusion generados a
+    // partir de una) seleccionada, entrar directo a editar sus puntos.
     if (selectedId != null) {
       const entry = sceneObjects.get(selectedId);
-      if (entry && entry.kind === 'spline') startSplinePointEdit(selectedId);
+      if (canEditSplinePoints(entry)) startSplinePointEdit(selectedId);
+      else syncSplineClosedCheckbox();
+    } else {
+      syncSplineClosedCheckbox();
     }
   } else if (mode === 'scale') {
     // Los tiradores directos (con mm e iman) son el unico control de
@@ -3876,6 +4062,7 @@ function setMode(mode) {
   }
   // Actualizar tiradores: solo se ven en modo scale
   updateHandles(selectedId);
+  updateAxisGuideVisibility(); // la guia del eje de Revolucion solo se ve en modo Curva
   syncCanvasTop();
 }
 modeButtons.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
@@ -3953,6 +4140,7 @@ viewButtons.forEach(b => b.addEventListener('click', () => {
     fourViewMode = false;
     wrap.classList.remove('four-view');
     fourViewBtn.classList.remove('active');
+    restoreQuadView(); // no dejar un cuadrante "maximizado" pegado si se sale por este boton en vez de por "Volver a 4 vistas"
   }
   setView(b.dataset.view);
 }));
@@ -3974,7 +4162,14 @@ setupGridCam(gridTopCam, 'top');
 
 const GRID_CAMS = { tl: perspCam, tr: gridFrontCam, bl: gridLeftCam, br: gridTopCam };
 
+// Si no es null, ESE cuadrante ocupa todo el canvas (los otros 3 quedan
+// escondidos, no destruidos) -- el boton "⛶" de cada cuadrante lo prende,
+// "Volver a 4 vistas" lo apaga. Sigue siendo "modo 4 vistas" por dentro
+// (fourViewMode no cambia), solo que se dibuja/toca uno solo por vez.
+let maximizedQuadrant = null;
+
 function quadrantAt(clientX, clientY) {
+  if (maximizedQuadrant) return maximizedQuadrant;
   const rect = wrap.getBoundingClientRect();
   const isRight = (clientX - rect.left) >= rect.width / 2;
   const isBottom = (clientY - rect.top) >= rect.height / 2;
@@ -3986,6 +4181,7 @@ function quadrantAt(clientX, clientY) {
 
 function quadrantRectDOM(q) {
   const rect = wrap.getBoundingClientRect();
+  if (maximizedQuadrant) return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
   const halfW = rect.width / 2, halfH = rect.height / 2;
   const left = (q === 'tr' || q === 'br') ? rect.left + halfW : rect.left;
   const top = (q === 'bl' || q === 'br') ? rect.top + halfH : rect.top;
@@ -3998,6 +4194,7 @@ function quadrantRectDOM(q) {
 // (DOM). Se comparte entre el render de las 4 vistas y el ajuste de
 // TransformControls para que nunca queden desincronizados.
 function quadrantGLRect(q, w, h) {
+  if (maximizedQuadrant) return { x: 0, y: 0, w, h };
   const hw = Math.round(w / 2), hh = Math.round(h / 2);
   switch (q) {
     case 'tl': return { x: 0,  y: hh, w: hw,     h: h - hh };
@@ -4056,9 +4253,31 @@ fourViewBtn.addEventListener('click', () => {
     viewButtons.forEach(b => b.classList.remove('active'));
     setActiveQuadrant('tl');
   } else {
+    restoreQuadView(); // si se salia del modo 4 vistas con un cuadrante maximizado, no dejarlo "pegado"
     setView(currentViewKey);
   }
 });
+
+// Boton "⛶" en la esquina de cada cuadrante: lo agranda a pantalla
+// completa sin salir del modo 4 vistas (las otras 3 camaras siguen ahi,
+// solo escondidas) -- "Volver a 4 vistas" deshace esto.
+document.querySelectorAll('.vp-max-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const q = btn.dataset.q;
+    maximizedQuadrant = q;
+    wrap.classList.add('quad-maximized');
+    setActiveQuadrant(q);
+    handleResize(); // recalcula transform.viewport para el rect a pantalla completa
+  });
+});
+function restoreQuadView() {
+  if (!maximizedQuadrant) return;
+  maximizedQuadrant = null;
+  wrap.classList.remove('quad-maximized');
+  handleResize(); // vuelve transform.viewport al cuarto que le toca al cuadrante activo
+}
+const quadRestoreBtn = document.getElementById('quadRestoreBtn');
+if (quadRestoreBtn) quadRestoreBtn.addEventListener('click', restoreQuadView);
 
 // --- Resize ---
 function handleResize() {
@@ -4109,6 +4328,14 @@ window.addEventListener('resize', handleResize);
 // barrido, mostrarlo en los 4 a la vez es seguro.
 function renderFourView() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
+  if (maximizedQuadrant) {
+    // Un cuadrante "maximizado" dibuja solo, a pantalla completa -- las
+    // otras 3 camaras ni se renderizan (no hace falta scissor de sobra).
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, w, h);
+    renderer.render(scene, GRID_CAMS[maximizedQuadrant]);
+    return;
+  }
   renderer.setScissorTest(true);
   ['tl', 'tr', 'bl', 'br'].forEach(q => {
     const r = quadrantGLRect(q, w, h);
@@ -4268,6 +4495,7 @@ function cloneEntryAt(src, positionWorld) {
     wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
   };
   if (isCustomGeomKind(src.kind)) extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
+  if (src.kind === 'spline') extraOpts.closed = !!src.closed;
   const built = buildObject(src.kind, colorHex, extraOpts);
   built.node.rotation.copy(src.mesh.rotation);
   built.node.scale.copy(src.mesh.scale);

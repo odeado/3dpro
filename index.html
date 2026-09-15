@@ -271,6 +271,42 @@
   .vp-br { top: calc(50% + 6px); left: calc(50% + 6px); }
   .vp-divider { position: absolute; background: #000; opacity: 0.5; pointer-events: none; display: none; z-index: 4; }
   #canvasWrap.four-view .vp-divider { display: block; }
+
+  /* Boton "Maximizar" en la esquina de cada cuadrante (modo 4 vistas) --
+     agranda esa camara a pantalla completa sin perder las otras 3 (se
+     puede volver con el boton "Volver a 4 vistas"). Mismo estilo visual
+     que las etiquetas de cuadrante, para que se vea como parte del mismo
+     grupo. */
+  .vp-max-btn {
+    position: absolute; width: 28px; height: 24px; display: none; z-index: 6;
+    background: rgba(0,0,0,0.55); color: #abb2bf; border: 1px solid #3a4048;
+    border-radius: 4px; font-size: 13px; line-height: 22px; text-align: center;
+    cursor: pointer; padding: 0;
+  }
+  #canvasWrap.four-view .vp-max-btn { display: block; }
+  .vp-max-tl { top: 6px; left: calc(50% - 34px); }
+  /* vp-max-tr va mas lejos del borde derecho (right:40px, no 6px) para no
+     quedar tapado por el boton ▶ de contraer/expandir el panel derecho,
+     que flota fijo justo en esa misma esquina. */
+  .vp-max-tr { top: 6px; right: 40px; }
+  .vp-max-bl { top: calc(50% + 6px); left: calc(50% - 34px); }
+  .vp-max-br { top: calc(50% + 6px); right: 6px; }
+  #quadRestoreBtn {
+    /* right:40px (no 6px) para no quedar tapado por el boton ▶ de
+       contraer/expandir el panel derecho, que flota fijo justo ahi arriba. */
+    position: absolute; top: 6px; right: 40px; display: none; z-index: 6;
+    background: rgba(0,0,0,0.55); color: #abb2bf; border: 1px solid #3a4048;
+    border-radius: 4px; font-size: 12px; padding: 5px 10px; cursor: pointer;
+    white-space: nowrap;
+  }
+  /* Cuando un cuadrante esta maximizado, ese unico cuadrante ocupa TODO el
+     canvas -- se esconden las etiquetas/divisores/botones de maximizar de
+     los otros 3 (no hay "otros 3" visibles) y aparece el boton de volver. */
+  #canvasWrap.quad-maximized .vp-label,
+  #canvasWrap.quad-maximized .vp-divider,
+  #canvasWrap.quad-maximized .vp-max-btn { display: none; }
+  #canvasWrap.quad-maximized #quadRestoreBtn { display: block; }
+
   .vp-divider-v { top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px; }
   .vp-divider-h { left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; }
 
@@ -523,6 +559,7 @@
     <div id="splineRow" class="context-group" style="display:none;">
       <span style="color:#5c6370; font-size:12px;">🧵 Curva: tocá para agregar puntos</span>
       <button id="splineFinishBtn" class="context-btn" style="background:#1e2e1e; border-color:#2d5c2d; color:#88dd88;">✅ Finalizar Curva</button>
+      <label class="context-slider" style="margin-left:4px;"><input id="splineClosedCheck" type="checkbox"> 🔒 Cerrar Curva</label>
       <span id="splinePointCount" style="color:#8a929e; font-size:11px;"></span>
     </div>
   </div>
@@ -547,6 +584,11 @@
     <div class="vp-label vp-tr">Frente</div>
     <div class="vp-label vp-bl">Izq.</div>
     <div class="vp-label vp-br">Arriba</div>
+    <button class="vp-max-btn vp-max-tl" data-q="tl" title="Maximizar esta vista">⛶</button>
+    <button class="vp-max-btn vp-max-tr" data-q="tr" title="Maximizar esta vista">⛶</button>
+    <button class="vp-max-btn vp-max-bl" data-q="bl" title="Maximizar esta vista">⛶</button>
+    <button class="vp-max-btn vp-max-br" data-q="br" title="Maximizar esta vista">⛶</button>
+    <button id="quadRestoreBtn" title="Volver a las 4 vistas">⤢ Volver a 4 vistas</button>
   </div>
 
   <!-- Modal: Lista de Piezas -->
