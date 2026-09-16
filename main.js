@@ -2835,17 +2835,35 @@ function pushHistory() {
   updateHistoryButtons();
 }
 
+// Mientras se esta DIBUJANDO un trazo de Curva nuevo (splineEditingId
+// todavia null), deshacer/rehacer aplican al trazo en construccion en vez
+// de al historial general -- ver splineDraftHistory mas abajo (declarado
+// junto al resto del estado de Curva). Esta funcion se llama tanto desde
+// el historial general (pushHistory/restoreSnapshot) como desde el
+// historial de trazo (pushSplineDraftHistory/restoreSplineDraftState), asi
+// los botones (y los atajos Ctrl+Z/Ctrl+Y, que dependen de que el boton NO
+// este disabled) siempre reflejan cual de los dos historiales esta activo
+// en este momento.
 function updateHistoryButtons() {
-  undoBtn.disabled = historyIndex <= 0;
-  redoBtn.disabled = historyIndex >= history.length - 1;
+  const draftMode = (toolMode === 'spline' && splineEditingId == null);
+  undoBtn.disabled = (draftMode && splinePoints.length > 0) ? false : (historyIndex <= 0);
+  redoBtn.disabled = (draftMode && splineDraftHistoryIndex < splineDraftHistory.length - 1) ? false : (historyIndex >= history.length - 1);
 }
 
 undoBtn.addEventListener('click', () => {
+  if (toolMode === 'spline' && splineEditingId == null && splinePoints.length > 0) {
+    undoSplineDraft();
+    return;
+  }
   if (historyIndex <= 0) return;
   historyIndex--;
   restoreSnapshot(history[historyIndex]);
 });
 redoBtn.addEventListener('click', () => {
+  if (toolMode === 'spline' && splineEditingId == null && splineDraftHistoryIndex < splineDraftHistory.length - 1) {
+    redoSplineDraft();
+    return;
+  }
   if (historyIndex >= history.length - 1) return;
   historyIndex++;
   restoreSnapshot(history[historyIndex]);
@@ -3363,6 +3381,74 @@ const splineClosedCheck = document.getElementById('splineClosedCheck');
 // El toggle "📐 Punto duro (90°)" -- ver syncSplineSharpCheckbox mas abajo.
 const splineSharpCheck = document.getElementById('splineSharpCheck');
 
+// --- Deshacer/rehacer MIENTRAS SE DIBUJA un trazo nuevo (antes de
+// "Finalizar Curva") -- pedido explicito: "falta que pueda deshacer... al
+// crear puntos de spline". Es un historial APARTE del historial general de
+// la escena (history/historyIndex, mas arriba): mientras se dibuja todavia
+// no existe ningun objeto en sceneObjects para snapshotear -- splinePoints/
+// splineDraftSharp/splineDraftClosed son solo variables sueltas en memoria
+// hasta que se aprieta "Finalizar Curva". Se guarda una copia de las 3 en
+// cada paso (agregar un punto, arrastrar uno existente, marcarlo duro/liso,
+// cerrar la curva) y deshacer/rehacer solo restaura esa copia -- no toca
+// para nada el historial general ni ningun objeto real de la escena.
+let splineDraftHistory = [];
+let splineDraftHistoryIndex = -1;
+function cloneSplineDraftState() {
+  return {
+    points: splinePoints.map(p => p.clone()),
+    sharp: splineDraftSharp.slice(),
+    closed: splineDraftClosed,
+    activeIndex: activeSplinePointIndex // que punto quedaba seleccionado en ESE momento (para el toggle Punto duro)
+  };
+}
+function pushSplineDraftHistory() {
+  splineDraftHistory = splineDraftHistory.slice(0, splineDraftHistoryIndex + 1);
+  splineDraftHistory.push(cloneSplineDraftState());
+  splineDraftHistoryIndex = splineDraftHistory.length - 1;
+  updateHistoryButtons();
+}
+function restoreSplineDraftState(state) {
+  splinePoints = state.points.map(p => p.clone());
+  splineDraftSharp = state.sharp.slice();
+  splineDraftClosed = state.closed;
+  // El punto activo (para el toggle Punto duro) se restaura tal cual estaba
+  // en ESE paso -- si simplemente se pusiera "el ultimo punto" aca, deshacer/
+  // rehacer despues de haber tocado/arrastrado un punto que NO es el ultimo
+  // dejaria el toggle apuntando al punto equivocado.
+  activeSplinePointIndex = (typeof state.activeIndex === 'number') ? state.activeIndex : splinePoints.length - 1;
+  if (splineClosedCheck) splineClosedCheck.checked = splineDraftClosed;
+  updateSplinePreview();
+  syncSplineSharpCheckbox();
+  updateHistoryButtons();
+}
+// Deshacer: si todavia no habia ningun paso previo guardado (por ejemplo,
+// se deshace justo despues del primerisimo punto), vacia el trazo del todo
+// -- es lo mas intuitivo ("deshacer" en el primer paso vuelve a foja cero,
+// igual que en cualquier editor). OJO: splineDraftHistory NO se vacia aca
+// (queda con sus pasos guardados) para que "rehacer" despues pueda volver a
+// traer el primer punto -- solo se resetea el INDICE a -1.
+function undoSplineDraft() {
+  if (splineDraftHistoryIndex <= 0) {
+    splineDraftHistoryIndex = -1;
+    splinePoints = [];
+    splineDraftSharp = [];
+    splineDraftClosed = false;
+    activeSplinePointIndex = -1;
+    if (splineClosedCheck) splineClosedCheck.checked = false;
+    updateSplinePreview();
+    syncSplineSharpCheckbox();
+    updateHistoryButtons();
+    return;
+  }
+  splineDraftHistoryIndex--;
+  restoreSplineDraftState(splineDraftHistory[splineDraftHistoryIndex]);
+}
+function redoSplineDraft() {
+  if (splineDraftHistoryIndex >= splineDraftHistory.length - 1) return;
+  splineDraftHistoryIndex++;
+  restoreSplineDraftState(splineDraftHistory[splineDraftHistoryIndex]);
+}
+
 // Mientras se esta dibujando (antes de "Finalizar Curva"), se ve una
 // bolita por cada punto ya puesto -- antes solo se veia la LINEA
 // conectando todo, y era dificil saber donde habia quedado cada toque
@@ -3417,11 +3503,16 @@ function createSplineObjectFromPoints(pts, closed, sharp) {
 
 function finishSplineDraw() {
   clearSplinePreview();
-  if (splinePoints.length < 2) { splinePoints = []; splineDraftSharp = []; splineDraftClosed = false; if (splineClosedCheck) splineClosedCheck.checked = false; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
+  if (splinePoints.length < 2) { splinePoints = []; splineDraftSharp = []; splineDraftClosed = false; splineDraftHistory = []; splineDraftHistoryIndex = -1; if (splineClosedCheck) splineClosedCheck.checked = false; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
   const id = createSplineObjectFromPoints(splinePoints, splineDraftClosed, splineDraftSharp);
   splinePoints = [];
   splineDraftSharp = [];
   splineDraftClosed = false;
+  // Se resetea el historial del trazo ya terminado -- si no, el PROXIMO
+  // trazo nuevo heredaria pasos de deshacer que ya no tienen sentido (serian
+  // de una curva distinta, ya convertida en objeto real).
+  splineDraftHistory = [];
+  splineDraftHistoryIndex = -1;
   if (splineClosedCheck) splineClosedCheck.checked = false;
   if (splinePointCountEl) splinePointCountEl.textContent = '';
   renderLayerList();
@@ -3477,6 +3568,7 @@ function startSplinePointEdit(id) {
   refreshSplinePointHandles();
   syncSplineClosedCheckbox();
   syncSplineSharpCheckbox();
+  updateHistoryButtons(); // entrar a editar una curva ya existente sale del "modo trazo nuevo" -- deshacer/rehacer vuelven a ser los del historial general
 }
 
 function stopSplinePointEdit() {
@@ -3485,6 +3577,7 @@ function stopSplinePointEdit() {
   clearSplinePointHandles();
   syncSplineClosedCheckbox();
   syncSplineSharpCheckbox();
+  updateHistoryButtons();
 }
 
 // El toggle "🔒 Cerrar Curva" refleja/edita distintas cosas segun el
@@ -3521,6 +3614,7 @@ if (splineClosedCheck) splineClosedCheck.addEventListener('change', () => {
   }
   splineDraftClosed = splineClosedCheck.checked;
   updateSplinePreview();
+  pushSplineDraftHistory();
 });
 
 // El toggle "📐 Punto duro (90°)" aplica al ULTIMO punto tocado/agregado
@@ -3569,6 +3663,7 @@ if (splineSharpCheck) splineSharpCheck.addEventListener('change', () => {
   if (activeSplinePointIndex < splineDraftSharp.length) {
     splineDraftSharp[activeSplinePointIndex] = splineSharpCheck.checked;
     updateSplinePreview();
+    pushSplineDraftHistory();
   }
 });
 
@@ -3622,28 +3717,56 @@ function startSplinePointDrag(mesh, cam) {
 }
 
 function onSplinePointDrag(clientX, clientY) {
-  if (draggingSplinePointIndex < 0 || splineEditingId == null || !splineDragPlane) return;
-  const entry = sceneObjects.get(splineEditingId);
-  if (!entry) return;
+  if (draggingSplinePointIndex < 0 || !splineDragPlane) return;
   const { rect, cam } = getPointerRayContext(clientX, clientY);
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, cam);
   const worldPoint = new THREE.Vector3();
   if (!raycaster.ray.intersectPlane(splineDragPlane, worldPoint)) return; // camara casi de canto contra el plano -- no deberia pasar en la practica
-  const local = entry.mesh.worldToLocal(worldPoint);
-  entry.splinePoints[draggingSplinePointIndex].copy(local);
-  regenerateEntryFromPoints(entry);
-  refreshSplinePointHandles();
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (!entry) return;
+    const local = entry.mesh.worldToLocal(worldPoint);
+    entry.splinePoints[draggingSplinePointIndex].copy(local);
+    regenerateEntryFromPoints(entry);
+    refreshSplinePointHandles();
+    return;
+  }
+  // Arrastrando un punto YA PUESTO de un trazo NUEVO todavia sin terminar
+  // (splineEditingId sigue null): splinePoints ya esta en espacio MUNDO
+  // mientras se dibuja, asi que se copia el punto de interseccion directo,
+  // sin pasar por worldToLocal (eso es solo para objetos ya creados con su
+  // propia matriz de transformacion).
+  if (draggingSplinePointIndex < splinePoints.length) {
+    splinePoints[draggingSplinePointIndex].copy(worldPoint);
+    updateSplinePreview();
+  }
 }
 
 function stopSplinePointDrag() {
   if (draggingSplinePointIndex < 0) return;
+  const wasEditingExisting = (splineEditingId != null);
   draggingSplinePointIndex = -1;
   splineDragging = false;
   splineDragPlane = null;
   orbit.enabled = true;
-  pushHistory();
+  if (wasEditingExisting) pushHistory();
+  else pushSplineDraftHistory();
+}
+
+// Doble toque sobre una bolita de un punto YA PUESTO de un trazo NUEVO
+// todavia sin terminar (splineEditingId sigue null) -- mismo gesto y misma
+// regla (no dejar menos de 2 puntos) que removeSplinePointAt, pero sobre el
+// trazo en construccion en vez de sobre un objeto ya creado.
+function removeDraftPointAt(index) {
+  if (splinePoints.length <= 2) return;
+  splinePoints.splice(index, 1);
+  splineDraftSharp.splice(index, 1);
+  activeSplinePointIndex = -1; // los indices se corrieron
+  updateSplinePreview();
+  syncSplineSharpCheckbox();
+  pushSplineDraftHistory();
 }
 
 function removeSplinePointAt(entry, index) {
@@ -3673,7 +3796,11 @@ wrap.addEventListener('pointerdown', (e) => {
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, cam);
-  const hits = (splineEditingId != null) ? raycaster.intersectObjects(splinePointMeshes, false) : [];
+  // Las bolitas ahora son tocables/arrastrables tanto editando una curva ya
+  // existente COMO mientras se dibuja un trazo nuevo -- pedido explicito:
+  // "poder seleccionar puntos ya hechos para editar posicion o dejarlo
+  // punto duro" (antes esto solo funcionaba despues de "Finalizar Curva").
+  const hits = raycaster.intersectObjects(splinePointMeshes, false);
   if (hits.length > 0) {
     e.stopPropagation();
     startSplinePointDrag(hits[0].object, cam);
@@ -3689,6 +3816,7 @@ wrap.addEventListener('pointerdown', (e) => {
   activeSplinePointIndex = splinePoints.length - 1; // el punto recien puesto queda "activo" para el toggle de Punto duro
   syncSplineSharpCheckbox();
   updateSplinePreview();
+  pushSplineDraftHistory();
 }, { capture: true });
 
 function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
@@ -3720,18 +3848,24 @@ function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
 }
 
 // Doble toque sobre una bolita: saca ese punto de la curva (si quedan mas
-// de 2). Mismo gesto que "borrar" en la mayoria de editores de curvas.
+// de 2). Mismo gesto que "borrar" en la mayoria de editores de curvas --
+// funciona tanto editando una curva ya existente como sobre un trazo nuevo
+// todavia sin terminar.
 wrap.addEventListener('dblclick', (e) => {
-  if (toolMode !== 'spline' || splineEditingId == null) return;
+  if (toolMode !== 'spline') return;
   const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, cam);
   const hits = raycaster.intersectObjects(splinePointMeshes, false);
   if (hits.length === 0) return;
-  const entry = sceneObjects.get(splineEditingId);
-  if (!entry) return;
-  removeSplinePointAt(entry, hits[0].object.userData.pointIndex);
+  const idx = hits[0].object.userData.pointIndex;
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (entry) removeSplinePointAt(entry, idx);
+    return;
+  }
+  removeDraftPointAt(idx);
 });
 
 // =====================================================================
@@ -4235,6 +4369,8 @@ function setMode(mode) {
     clearSplinePreview();
     splinePoints = [];
     splineDraftSharp = [];
+    splineDraftHistory = [];
+    splineDraftHistoryIndex = -1;
     stopSplinePointEdit();
   }
   toolMode = mode;
@@ -4264,9 +4400,10 @@ function setMode(mode) {
     if (selectedId != null) {
       const entry = sceneObjects.get(selectedId);
       if (canEditSplinePoints(entry)) startSplinePointEdit(selectedId);
-      else syncSplineClosedCheckbox();
+      else { syncSplineClosedCheckbox(); updateHistoryButtons(); }
     } else {
       syncSplineClosedCheckbox();
+      updateHistoryButtons();
     }
   } else if (mode === 'scale') {
     // Los tiradores directos (con mm e iman) son el unico control de
