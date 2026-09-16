@@ -3330,7 +3330,18 @@ function finishSplineDraw() {
   renderLayerList();
   selectObject(id);
   pushHistory();
-  startSplinePointEdit(id); // deja los puntos listos para ajustar de una, sin tener que volver a entrar
+  // OJO: antes esto llamaba a startSplinePointEdit(id) para "dejar los
+  // puntos listos para ajustar de una". El problema (reportado: "no me
+  // finaliza la curva") es que mientras splineEditingId siga apuntando a
+  // ESTA curva, el pointerdown de mas abajo (linea ~3482) sigue agregando
+  // cada toque nuevo COMO PUNTO DE LA MISMA CURVA en vez de arrancar la
+  // curva siguiente -- entonces nunca se podia "terminar" y arrancar otra.
+  // Por eso ahora se llama a stopSplinePointEdit(): la curva queda
+  // terminada y el proximo toque arranca un trazo nuevo. Para volver a
+  // tocar los puntos de ESTA curva mas adelante, se la selecciona (panel
+  // de capas) y se vuelve a apretar la herramienta Curva -- eso ya entra
+  // solo en modo edicion de puntos (ver setMode('spline') mas abajo).
+  stopSplinePointEdit();
 }
 if (splineFinishBtn) splineFinishBtn.addEventListener('click', finishSplineDraw);
 
