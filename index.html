@@ -756,6 +756,42 @@
               <label>Tamaño del Bisel: <span id="textBevelSizeVal">1.5</span> mm</label>
               <input id="textBevelSizeInput" type="range" min="0.2" max="6" step="0.2" value="1.5">
             </div>
+            <div class="prop-row">
+              <label>Adaptar a Curva</label>
+              <select id="textSplineTargetSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="">Ninguno (texto recto)</option>
+              </select>
+            </div>
+            <div id="textSplineParamsRow" style="display:none;">
+              <div class="prop-row">
+                <label>Cantidad de letras: <span id="textLetterCountVal">-</span></label>
+                <input id="textLetterCountInput" type="range" min="1" max="60" step="1" value="4">
+              </div>
+              <div class="prop-row">
+                <label>Posición inicial: <span id="textStartPercentVal">0</span>%</label>
+                <input id="textStartPercentInput" type="range" min="0" max="100" step="1" value="0">
+              </div>
+              <div class="prop-row">
+                <label>Cobertura: <span id="textCoveragePercentVal">100</span>%</label>
+                <input id="textCoveragePercentInput" type="range" min="5" max="100" step="1" value="100">
+              </div>
+              <div class="prop-row-inline">
+                <label>Alinear al tangente (girar con la curva)</label>
+                <input id="textAlignToTangentCheck" type="checkbox" checked>
+              </div>
+              <div class="prop-row-inline">
+                <label>Voltear</label>
+                <input id="textFlipUpCheck" type="checkbox">
+              </div>
+              <div class="prop-row-inline">
+                <label>Invertir dirección</label>
+                <input id="textReverseDirectionCheck" type="checkbox">
+              </div>
+              <div class="prop-row">
+                <label>Inclinación: <span id="textTiltDegVal">0</span>°</label>
+                <input id="textTiltDegInput" type="range" min="-180" max="180" step="1" value="0">
+              </div>
+            </div>
           </div>
         </div>
 

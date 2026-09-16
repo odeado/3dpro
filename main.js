@@ -520,12 +520,159 @@ async function addTextPrimitive() {
   pushHistory();
 }
 
+// "Adaptar a Curva": en vez de armar el texto recto (una sola TextGeometry
+// centrada), ubica y orienta CADA LETRA por separado siguiendo una Curva ya
+// dibujada (splinePoints de otra figura tipo Curva/Revolucion/Tubo/
+// Extrusion) -- el mismo efecto que ya hace el editor de Andres para el
+// otro proyecto (C:\Scripts\Indesing, funcion layoutTextOnSpline), pero
+// adaptado aca para que funcione sobre CUALQUIER curva dibujada a mano (no
+// solo un circulo perfecto): Indesing usa un plano fijo con una normal
+// constante porque su "spline" siempre es un circulo; una curva cualquiera
+// en 3D no tiene un plano fijo, asi que en cambio se usa el marco de Frenet
+// de la curva en cada punto (computeFrenetFrames) -- la misma tecnica que
+// ya usa buildTaperedTubeGeometry para que el Pelo no se retuerza -- para
+// que cada letra quede "parada" sobre la curva y girando con ella.
+//
+// A diferencia de Indesing (que arma un THREE.Group con una TextGeometry
+// por letra), aca se funden TODAS las letras en UNA sola BufferGeometry
+// (mergeIndexedGeometries, la misma que junta las tapas del Lathe) porque
+// el resto de esta app da por sentado que cada figura es UNA sola malla
+// (tocar para seleccionar, el cuadro de los tiradores, el gizmo, guardar/
+// clonar) -- se pierde poder tocar una letra suelta, pero esta app tampoco
+// lo permite para ninguna otra figura compuesta.
+//
+// Las letras se calculan en el espacio LOCAL del objetivo (entry.splinePoints
+// del objetivo ya estan en ese espacio) y despues se copia la posicion/
+// rotacion/escala del objetivo entero sobre el propio Texto -- asi mover,
+// rotar o escalar la curva mueve el texto pegado con ella (ver el sync en
+// vivo dentro de animate()), sin tener que rearmar la geometria letra por
+// letra en cada cuadro (solo hace falta rearmarla cuando cambia la FORMA de
+// la curva o algun parametro propio del texto/la adaptacion).
+function layoutTextOnSpline(entry) {
+  const target = sceneObjects.get(entry.textSplineTargetId);
+  if (!target || !canEditSplinePoints(target) || !target.splinePoints || target.splinePoints.length < 2) return false;
+  const font = fontCache[entry.fontKey] || fontCache[TEXT_DEFAULT_FONT];
+  if (!font) return false;
+
+  const rawText = entry.text || '';
+  const baseCount = [...rawText].length;
+  if (baseCount === 0) return false;
+  const letterCount = (entry.textLetterCount != null && entry.textLetterCount > 0) ? Math.round(entry.textLetterCount) : baseCount;
+  if (letterCount < 1) return false;
+  const chars = [...rawText];
+
+  const closed = !!target.closed;
+  const curve = new THREE.CatmullRomCurve3(target.splinePoints, closed);
+  const segs = Math.max(64, (target.splinePoints.length - 1) * 8, letterCount * 4);
+  const frames = curve.computeFrenetFrames(segs, closed);
+  // El Frenet Frame de three.js elige el signo inicial de "normal" con una
+  // heuristica interna (perpendicular al primer tangente, sin preferencia
+  // por ningun "arriba") -- para una curva mas o menos horizontal (el caso
+  // comun: un aro, una curva ondulada dibujada mirando desde arriba) eso
+  // puede hacer que TODAS las letras salgan boca abajo, siempre para el
+  // mismo lado (ver reporte visual: "FELIZ CUMPLE" salio invertido letra
+  // por letra en un aro). Se corrige una sola vez aca, en base al promedio
+  // de hacia donde apunta "normal" en toda la vuelta: si apunta mas para
+  // abajo que para arriba, se da vuelta entera (si ya apuntaba para arriba,
+  // esto no cambia nada).
+  let upBias = 0;
+  for (let i = 0; i <= segs; i++) upBias += frames.normals[i].y;
+  if (upBias < 0) { for (let i = 0; i <= segs; i++) frames.normals[i].negate(); }
+
+  const startU = (entry.textStartPercent != null ? entry.textStartPercent : 0) / 100;
+  const coverage = (entry.textCoveragePercent != null ? entry.textCoveragePercent : 100) / 100;
+  // Vuelta completa (curva cerrada + 100% de cobertura): cada letra ocupa
+  // una porcion igual, sin que la ultima se pise con la primera. Arco
+  // parcial: la primera y la ultima letra caen justo en los dos extremos
+  // pedidos (por eso se divide por letterCount-1, no por letterCount).
+  const fullLoop = closed && coverage >= 0.999;
+  const step = fullLoop ? (coverage / letterCount) : (letterCount > 1 ? coverage / (letterCount - 1) : 0);
+
+  const alignToTangent = entry.textAlignToTangent !== false;
+  const flipUp = !!entry.textFlipUp;
+  const tiltRad = (entry.textTiltDeg || 0) * Math.PI / 180;
+  const reverse = !!entry.textReverseDirection;
+
+  // "Alinear al tangente" apagado: todas las letras conservan la MISMA
+  // orientacion (la del primer punto del arco) en vez de ir girando con la
+  // curva -- util para un texto que solo sigue la POSICION del trazo pero
+  // se lee siempre derecho.
+  const fixedIdx = Math.min(segs, Math.max(0, Math.round(((startU % 1 + 1) % 1) * segs)));
+  const fixedTangent = frames.tangents[fixedIdx].clone();
+  const fixedNormal = frames.normals[fixedIdx].clone();
+
+  const pieces = [];
+  const P = new THREE.Vector3();
+  const m = new THREE.Matrix4();
+  const up = new THREE.Vector3();
+  const fwd = new THREE.Vector3();
+
+  for (let i = 0; i < letterCount; i++) {
+    const ch = chars[(reverse ? (letterCount - 1 - i) : i) % chars.length];
+    let u = startU + i * step;
+    u = ((u % 1) + 1) % 1; // vuelta completa: siempre dentro de [0,1)
+    if (!closed) u = Math.min(1, Math.max(0, u));
+    if (ch === ' ') continue; // el espacio ocupa su lugar en el arco pero no dibuja nada
+
+    curve.getPointAt(u, P);
+    const idx = Math.min(segs, Math.max(0, Math.round(u * segs)));
+    const tangent = alignToTangent ? frames.tangents[idx] : fixedTangent;
+    up.copy(alignToTangent ? frames.normals[idx] : fixedNormal);
+    fwd.copy(tangent).cross(up); // binormal: hacia "afuera" de la curva (grosor de la letra)
+
+    if (flipUp) { up.negate(); fwd.negate(); }
+    if (tiltRad) {
+      const cos = Math.cos(tiltRad), sin = Math.sin(tiltRad);
+      const upX = up.x * cos + fwd.x * sin, upY = up.y * cos + fwd.y * sin, upZ = up.z * cos + fwd.z * sin;
+      const fwX = -up.x * sin + fwd.x * cos, fwY = -up.y * sin + fwd.y * cos, fwZ = -up.z * sin + fwd.z * cos;
+      up.set(upX, upY, upZ);
+      fwd.set(fwX, fwY, fwZ);
+    }
+
+    const letterGeo = buildTextGeometry(ch, entry.fontKey, entry.textSize, entry.textDepth, entry.textBevel, entry.textBevelSize);
+    if (!letterGeo.attributes.position || letterGeo.attributes.position.count === 0) { letterGeo.dispose(); continue; }
+    m.makeBasis(tangent, up, fwd);
+    m.setPosition(P);
+    letterGeo.applyMatrix4(m);
+    pieces.push(letterGeo);
+  }
+
+  if (pieces.length === 0) return false;
+  const merged = mergeIndexedGeometries(pieces);
+  pieces.forEach(g => g.dispose());
+  entry.mesh.geometry.dispose();
+  entry.mesh.geometry = merged;
+  entry.mesh.position.copy(target.mesh.position);
+  entry.mesh.quaternion.copy(target.mesh.quaternion);
+  entry.mesh.scale.copy(target.mesh.scale);
+  return true;
+}
+
+// Cualquier cambio de forma en una Curva/Revolucion/Tubo/Extrusion tiene
+// que actualizar tambien cualquier Texto 3D que este "adaptado" a ella --
+// ver regenerateEntryFromPoints (arrastrar puntos, Cerrar curva, Punto
+// duro, sliders del generador) y removeObject (si se borra el objetivo).
+function relayoutTextsAttachedTo(targetId) {
+  sceneObjects.forEach(e => {
+    if (e.kind === 'text' && e.textSplineTargetId === targetId) rebuildTextGeometry(e);
+  });
+}
+
 // Reconstruye la geometria de un Texto 3D ya existente a partir de sus
 // parametros actuales (entry.text/fontKey/textSize/textDepth/textBevel...)
 // -- se llama cada vez que se toca cualquiera de los controles en vivo de
-// Atributos, para que el cambio se vea al instante.
+// Atributos, para que el cambio se vea al instante. Si el texto esta
+// "adaptado a curva" (textSplineTargetId), arma las letras siguiendo esa
+// curva en cambio -- ver layoutTextOnSpline.
 function rebuildTextGeometry(entry) {
   if (!entry || entry.kind !== 'text') return;
+  if (entry.textSplineTargetId != null) {
+    if (layoutTextOnSpline(entry)) return;
+    // El objetivo ya no sirve (se borro, o dejo de tener puntos editables)
+    // -- se cae de nuevo a texto recto en vez de dejar la malla vieja o
+    // vacia pegada en pantalla.
+    entry.textSplineTargetId = null;
+  }
   const geo = buildTextGeometry(entry.text, entry.fontKey, entry.textSize, entry.textDepth, entry.textBevel, entry.textBevelSize);
   entry.mesh.geometry.dispose();
   entry.mesh.geometry = geo;
@@ -545,6 +692,15 @@ function removeObject(id) {
     if (child.parentId === id) {
       scene.attach(child.mesh); // conserva su posicion/rotacion/escala en el mundo
       child.parentId = null;
+    }
+  });
+  // Si esta figura era el objetivo de algun Texto 3D "adaptado a curva",
+  // ese texto no puede seguir apuntando a algo que ya no existe -- se
+  // despega y vuelve a texto recto en el lugar donde haya quedado.
+  sceneObjects.forEach(e => {
+    if (e.kind === 'text' && e.textSplineTargetId === id) {
+      e.textSplineTargetId = null;
+      rebuildTextGeometry(e);
     }
   });
   // Igual que en updateClonerLive(): si esta figura esta adentro de un
@@ -1131,6 +1287,54 @@ function selectObject(id) {
         if (textBevelCheck) textBevelCheck.checked = !!entry.textBevel;
         if (textBevelSizeInput) textBevelSizeInput.value = bsize;
         if (textBevelSizeVal) textBevelSizeVal.textContent = bsize;
+
+        // "Adaptar a Curva": el desplegable se llena de nuevo cada vez que
+        // se selecciona este Texto (la lista de Curvas/Revoluciones/Tubos/
+        // Extrusiones de la escena puede haber cambiado) -- se ofrece
+        // cualquier figura con puntos editables MENOS este mismo texto.
+        const textSplineTargetSelect = document.getElementById('textSplineTargetSelect');
+        const textSplineParamsRow = document.getElementById('textSplineParamsRow');
+        if (textSplineTargetSelect) {
+          textSplineTargetSelect.innerHTML = '<option value="">Ninguno (texto recto)</option>';
+          sceneObjects.forEach(cand => {
+            if (cand.id === entry.id || !canEditSplinePoints(cand)) return;
+            const opt = document.createElement('option');
+            opt.value = String(cand.id);
+            opt.textContent = cand.name || (KIND_LABEL[cand.kind] || cand.kind) + '_' + cand.id;
+            textSplineTargetSelect.appendChild(opt);
+          });
+          textSplineTargetSelect.value = entry.textSplineTargetId != null ? String(entry.textSplineTargetId) : '';
+        }
+        const attached = entry.textSplineTargetId != null;
+        if (textSplineParamsRow) textSplineParamsRow.style.display = attached ? 'block' : 'none';
+        if (attached) {
+          const letterCountEl = document.getElementById('textLetterCountInput');
+          const letterCountVal = document.getElementById('textLetterCountVal');
+          const startPercentEl = document.getElementById('textStartPercentInput');
+          const startPercentVal = document.getElementById('textStartPercentVal');
+          const coveragePercentEl = document.getElementById('textCoveragePercentInput');
+          const coveragePercentVal = document.getElementById('textCoveragePercentVal');
+          const alignEl = document.getElementById('textAlignToTangentCheck');
+          const flipEl = document.getElementById('textFlipUpCheck');
+          const reverseEl = document.getElementById('textReverseDirectionCheck');
+          const tiltEl = document.getElementById('textTiltDegInput');
+          const tiltVal = document.getElementById('textTiltDegVal');
+          const letterCount = entry.textLetterCount != null ? entry.textLetterCount : [...(entry.text || '')].length;
+          const startPercent = entry.textStartPercent != null ? entry.textStartPercent : 0;
+          const coveragePercent = entry.textCoveragePercent != null ? entry.textCoveragePercent : 100;
+          const tiltDeg = entry.textTiltDeg != null ? entry.textTiltDeg : 0;
+          if (letterCountEl) letterCountEl.value = letterCount;
+          if (letterCountVal) letterCountVal.textContent = letterCount;
+          if (startPercentEl) startPercentEl.value = startPercent;
+          if (startPercentVal) startPercentVal.textContent = startPercent;
+          if (coveragePercentEl) coveragePercentEl.value = coveragePercent;
+          if (coveragePercentVal) coveragePercentVal.textContent = coveragePercent;
+          if (alignEl) alignEl.checked = entry.textAlignToTangent !== false;
+          if (flipEl) flipEl.checked = !!entry.textFlipUp;
+          if (reverseEl) reverseEl.checked = !!entry.textReverseDirection;
+          if (tiltEl) tiltEl.value = tiltDeg;
+          if (tiltVal) tiltVal.textContent = tiltDeg;
+        }
       }
     }
 
@@ -2443,6 +2647,62 @@ if (textFontSelect) {
   });
 }
 
+// "Adaptar a Curva": elegir el objetivo (u ninguno, para volver a texto
+// recto) muestra/oculta los controles de abajo y rearma las letras.
+const textSplineTargetSelect = document.getElementById('textSplineTargetSelect');
+if (textSplineTargetSelect) {
+  textSplineTargetSelect.addEventListener('change', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || entry.kind !== 'text') return;
+    const val = textSplineTargetSelect.value;
+    entry.textSplineTargetId = val ? parseInt(val, 10) : null;
+    rebuildTextGeometry(entry);
+    updateHandles(entry.id);
+    selectObject(entry.id); // refresca el panel (muestra/oculta textSplineParamsRow)
+    pushHistory();
+  });
+}
+
+function liveTextSplineUpdate() {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind !== 'text' || entry.textSplineTargetId == null) return;
+  const letterCountEl = document.getElementById('textLetterCountInput');
+  const letterCountVal = document.getElementById('textLetterCountVal');
+  const startPercentEl = document.getElementById('textStartPercentInput');
+  const startPercentVal = document.getElementById('textStartPercentVal');
+  const coveragePercentEl = document.getElementById('textCoveragePercentInput');
+  const coveragePercentVal = document.getElementById('textCoveragePercentVal');
+  const alignEl = document.getElementById('textAlignToTangentCheck');
+  const flipEl = document.getElementById('textFlipUpCheck');
+  const reverseEl = document.getElementById('textReverseDirectionCheck');
+  const tiltEl = document.getElementById('textTiltDegInput');
+  const tiltVal = document.getElementById('textTiltDegVal');
+  if (letterCountEl) entry.textLetterCount = parseInt(letterCountEl.value, 10) || 1;
+  if (startPercentEl) entry.textStartPercent = parseFloat(startPercentEl.value) || 0;
+  if (coveragePercentEl) entry.textCoveragePercent = parseFloat(coveragePercentEl.value) || 1;
+  if (alignEl) entry.textAlignToTangent = !!alignEl.checked;
+  if (flipEl) entry.textFlipUp = !!flipEl.checked;
+  if (reverseEl) entry.textReverseDirection = !!reverseEl.checked;
+  if (tiltEl) entry.textTiltDeg = parseFloat(tiltEl.value) || 0;
+  if (letterCountVal) letterCountVal.textContent = entry.textLetterCount;
+  if (startPercentVal) startPercentVal.textContent = entry.textStartPercent;
+  if (coveragePercentVal) coveragePercentVal.textContent = entry.textCoveragePercent;
+  if (tiltVal) tiltVal.textContent = entry.textTiltDeg;
+  rebuildTextGeometry(entry);
+  updateHandles(entry.id);
+}
+[
+  'textLetterCountInput', 'textStartPercentInput', 'textCoveragePercentInput',
+  'textAlignToTangentCheck', 'textFlipUpCheck', 'textReverseDirectionCheck', 'textTiltDegInput'
+].forEach(elId => {
+  const inp = document.getElementById(elId);
+  if (!inp) return;
+  inp.addEventListener('input', liveTextSplineUpdate);
+  inp.addEventListener('change', () => pushHistory());
+});
+
 if (clonerRadiusInput) {
   clonerRadiusInput.addEventListener('input', () => {
     const cloner = getActiveCloner();
@@ -2753,6 +3013,15 @@ function snapshotScene() {
         s.textDepth = e.textDepth != null ? e.textDepth : null;
         s.textBevel = e.textBevel != null ? e.textBevel : null;
         s.textBevelSize = e.textBevelSize != null ? e.textBevelSize : null;
+        // "Adaptar a Curva" -- ver layoutTextOnSpline.
+        s.textSplineTargetId = e.textSplineTargetId != null ? e.textSplineTargetId : null;
+        s.textLetterCount = e.textLetterCount != null ? e.textLetterCount : null;
+        s.textStartPercent = e.textStartPercent != null ? e.textStartPercent : null;
+        s.textCoveragePercent = e.textCoveragePercent != null ? e.textCoveragePercent : null;
+        s.textAlignToTangent = e.textAlignToTangent !== false;
+        s.textFlipUp = !!e.textFlipUp;
+        s.textReverseDirection = !!e.textReverseDirection;
+        s.textTiltDeg = e.textTiltDeg != null ? e.textTiltDeg : null;
       }
     } else if (e.sculpted && e.mesh.geometry && e.mesh.geometry.attributes.position) {
       // Solo se guardan los vertices de las figuras que de verdad se
@@ -2825,7 +3094,15 @@ function rebuildSceneFrom(snap) {
       textSize: s.textSize != null ? s.textSize : undefined,
       textDepth: s.textDepth != null ? s.textDepth : undefined,
       textBevel: s.textBevel != null ? s.textBevel : undefined,
-      textBevelSize: s.textBevelSize != null ? s.textBevelSize : undefined
+      textBevelSize: s.textBevelSize != null ? s.textBevelSize : undefined,
+      textSplineTargetId: s.textSplineTargetId != null ? s.textSplineTargetId : null,
+      textLetterCount: s.textLetterCount != null ? s.textLetterCount : undefined,
+      textStartPercent: s.textStartPercent != null ? s.textStartPercent : undefined,
+      textCoveragePercent: s.textCoveragePercent != null ? s.textCoveragePercent : undefined,
+      textAlignToTangent: s.textAlignToTangent !== false,
+      textFlipUp: !!s.textFlipUp,
+      textReverseDirection: !!s.textReverseDirection,
+      textTiltDeg: s.textTiltDeg != null ? s.textTiltDeg : undefined
     });
     if (s.id > maxId) maxId = s.id;
   });
@@ -3703,10 +3980,15 @@ function rebuildSplineGeometry(entry) {
 // (con los mismos parametros que ya tenia) para que el solido seonga al
 // dia; si todavia es una guia sin convertir, alcanza con rehacer la linea.
 function regenerateEntryFromPoints(entry) {
-  if (entry.kind === 'lathe') { applyLathe(entry, entry.latheSegments); return; }
-  if (entry.kind === 'tube') { applyTube(entry, entry.tubeRootRadius, entry.tubeTipRadius, entry.tubeRadialSegments); return; }
-  if (entry.kind === 'extrude') { applyExtrude(entry, entry.extrudeDepth, entry.extrudeBevel, entry.extrudeBevelSize); return; }
-  rebuildSplineGeometry(entry);
+  if (entry.kind === 'lathe') { applyLathe(entry, entry.latheSegments); }
+  else if (entry.kind === 'tube') { applyTube(entry, entry.tubeRootRadius, entry.tubeTipRadius, entry.tubeRadialSegments); }
+  else if (entry.kind === 'extrude') { applyExtrude(entry, entry.extrudeDepth, entry.extrudeBevel, entry.extrudeBevelSize); }
+  else { rebuildSplineGeometry(entry); }
+  // Cualquier cambio de forma en esta curva (arrastrar/agregar/sacar un
+  // punto, Punto duro, Cerrar curva, o el propio slider del generador de
+  // arriba) tiene que actualizar tambien cualquier Texto 3D "adaptado" a
+  // ella -- ver layoutTextOnSpline.
+  relayoutTextsAttachedTo(entry.id);
 }
 
 let splineDragging = false;
@@ -3981,6 +4263,31 @@ function applyLathe(entry, segments) {
   // el slider de "Segmentos" en Atributos la vuelve a generar en vivo con
   // otro valor) -- ambas conservan splinePoints para poder rehacerla.
   if (!entry || (entry.kind !== 'spline' && entry.kind !== 'lathe') || !entry.splinePoints || entry.splinePoints.length < 2) return;
+  // El "radio" de cada punto del perfil tiene que medirse desde el EJE DE
+  // VERDAD (la linea guia vertical, siempre fija en X=0/Z=0 del mundo,
+  // vista mientras se dibuja) -- no desde donde cayo el PRIMER toque al
+  // dibujar la curva, que es el origen que usa entry.splinePoints (estan
+  // en espacio LOCAL, relativos a entry.mesh.position). Si el primer punto
+  // no fue puesto exactamente sobre el eje -- por ejemplo una arandela
+  // donde NINGUNA punta del perfil toca el eje, el caso que reporto Andres
+  // comparando con Cinema4D -- el radio quedaba mal calculado (la distancia
+  // al PRIMER PUNTO, no al eje), y la Revolucion salia colapsada/aplastada
+  // ("sin cuerpo, queda plano plano"). Se recentra una sola vez, la PRIMERA
+  // vez que se convierte (todavia 'spline'): se mueve el pivote del objeto
+  // al eje de verdad y se le suma esa misma distancia a cada punto
+  // guardado, asi la posicion ABSOLUTA de cada punto en el mundo no cambia
+  // nada (el perfil dibujado se ve identico) pero sus coordenadas LOCALES
+  // ahora si representan la distancia real al eje. No se repite en
+  // llamados posteriores (ya convertido a 'lathe') para no desarmar el
+  // perfil cada vez que se toca el slider de Segmentos, ni si despues se
+  // mueve el solido ya terminado a otro lugar de la escena (eso es aparte,
+  // y esta bien que solo traslade la figura ya armada).
+  if (entry.kind === 'spline' && (entry.mesh.position.x !== 0 || entry.mesh.position.z !== 0)) {
+    const offX = entry.mesh.position.x, offZ = entry.mesh.position.z;
+    entry.splinePoints.forEach(p => { p.x += offX; p.z += offZ; });
+    entry.mesh.position.x = 0;
+    entry.mesh.position.z = 0;
+  }
   ensureSolidMeshForGenerator(entry);
   const segs = segments != null ? segments : (entry.latheSegments || 32);
   const profile = latheProfileFromPoints(entry.splinePoints);
@@ -4906,6 +5213,19 @@ function animate() {
   sceneObjects.forEach(entry => {
     if (entry.clonerMode == null) return;
     syncClonerChildrenLive(entry);
+  });
+
+  // Live "adaptar a curva": si el objetivo se mueve/rota/escala con el
+  // gizmo (no que cambie de FORMA, eso ya lo cubre regenerateEntryFromPoints
+  // -> relayoutTextsAttachedTo), el Texto 3D pegado a el lo sigue al
+  // instante sin rearmar las letras en cada cuadro.
+  sceneObjects.forEach(entry => {
+    if (entry.kind !== 'text' || entry.textSplineTargetId == null) return;
+    const target = sceneObjects.get(entry.textSplineTargetId);
+    if (!target) return;
+    entry.mesh.position.copy(target.mesh.position);
+    entry.mesh.quaternion.copy(target.mesh.quaternion);
+    entry.mesh.scale.copy(target.mesh.scale);
   });
 
   if (fourViewMode) {
