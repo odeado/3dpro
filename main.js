@@ -4221,6 +4221,53 @@ function latheProfileFromPoints(points) {
       profile[i].y += goingDown ? -0.01 : 0.01;
     }
   }
+  // Reporte de Andres (capturas con Cinema4D/Blender de referencia): con un
+  // perfil zigzagueante mas elaborado ("tipo casco"), la Revolucion salia
+  // con un hueco/media luna oscura bien visible -- "queda abierto?". La
+  // malla en si NO tenia ningun agujero real (se verifico contando bordes
+  // libres: 0 en todos los casos), asi que el hueco no era un agujero de
+  // verdad sino caras que quedaban del lado de ADENTRO -- invisibles contra
+  // la luz porque el material usa material.side = FrontSide (una sola
+  // cara).
+  //
+  // La causa real: `THREE.LatheGeometry` arma la normal (tanto la analitica
+  // propia como la que se recalcula despues con computeVertexNormals) de
+  // forma tal que SOLO da "hacia afuera" cuando el camino se recorre en una
+  // direccion global fija (de abajo hacia arriba) -- si el camino se
+  // recorre en la direccion contraria (de arriba hacia abajo, por ejemplo
+  // si Andres dibujo el casco empezando por la punta de arriba y bajando
+  // hasta el borde, como es natural para esa forma), TODA la superficie
+  // lateral sale con la normal invertida, y con FrontSide se vuelve
+  // invisible desde afuera en las zonas donde no hay otra cara "tapando"
+  // por detras -- eso es exactamente la media luna oscura reportada, no un
+  // agujero real. Se confirmo armando el mismo perfil y comparando el signo
+  // de la normal contra la direccion radial (hacia afuera del eje): con el
+  // camino dibujado "de arriba hacia abajo" salia invertido en 297 de 330
+  // vertices del lateral; invirtiendo nada mas el ARREGLO completo (sin
+  // tocar el zigzag interno, que ya viene bien separado arriba) los 330
+  // salen con la normal apuntando bien hacia afuera.
+  //
+  // La solucion: normalizar la DIRECCION GLOBAL del camino a "de abajo
+  // hacia arriba" (el mismo sentido que siempre asumio el codigo viejo al
+  // ordenar por altura, pero ahora sin tocar el ORDEN/zigzag interno de los
+  // puntos -- solo se decide si hace falta leer el arreglo entero al
+  // reves). Se compara el promedio de altura de la primera mitad del
+  // camino contra la segunda mitad (mas robusto que comparar solo el
+  // primer y ultimo punto, por si esos 2 puntos puntuales quedan a la
+  // misma altura por casualidad) -- si la segunda mitad promedia MAS BAJO
+  // que la primera, el camino se dibujo "al reves" y se invierte el
+  // arreglo completo antes de devolverlo. Cinema4D y Blender no tienen este
+  // problema porque sus herramientas de Lathe/Spin recalculan la normal de
+  // cada cara a partir de la geometria real (independiente de en que
+  // direccion se dibujo el perfil) -- por eso con la MISMA curva ahi salia
+  // bien y en la nuestra no.
+  if (profile.length > 1) {
+    const half = Math.floor(profile.length / 2);
+    let sumFirst = 0, sumLast = 0;
+    for (let i = 0; i < half; i++) sumFirst += profile[i].y;
+    for (let i = profile.length - half; i < profile.length; i++) sumLast += profile[i].y;
+    if ((sumLast / half) < (sumFirst / half)) profile.reverse();
+  }
   return profile;
 }
 
@@ -5267,6 +5314,7 @@ function animate() {
   updateHUDPositions();
 }
 animate();
+
 
 
 syncCanvasTop(); // deja el alto del canvas acorde a la barra de arriba (2 o 3 filas) y los limites de orthoCam listos
