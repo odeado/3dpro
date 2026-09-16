@@ -2289,6 +2289,19 @@ if (symBakeBtn) {
 }
 
 // --- Modificador Clonador en Vivo ---
+// Calcula, para el modo Circular del Clonador, la posicion en el MUNDO que
+// le toca al item numero `i` (0 = el original, 1..count = las copias) sobre
+// el circulo de radio `radius` centrado en `center` (world), en el eje
+// dado ('x'/'y'/'z' = alrededor de QUE eje gira el circulo, igual
+// convencion que el selector "Eje" del modal de creacion).
+function circularSlotPosition(center, axis, radius, angle) {
+  const pos = center.clone();
+  if (axis === 'x') { pos.y = center.y + Math.cos(angle) * radius; pos.z = center.z + Math.sin(angle) * radius; }
+  else if (axis === 'z') { pos.x = center.x + Math.cos(angle) * radius; pos.y = center.y + Math.sin(angle) * radius; }
+  else { pos.x = center.x + Math.cos(angle) * radius; pos.z = center.z + Math.sin(angle) * radius; } // 'y' (default)
+  return pos;
+}
+
 function updateClonerLive(clonerEntry) {
   if (!clonerEntry || !clonerEntry.clonerMode) return;
   const srcId = clonerEntry.clonerSourceId;
@@ -2341,16 +2354,56 @@ function updateClonerLive(clonerEntry) {
       }
     }
   } else if (mode === 'circular') {
+    // Reporte de Andres (captura: 8 copias, radio 150, "queda una al medio"
+    // -- las copias no formaban un circulo parejo, y algo terminaba cerca
+    // del centro). Causa real: esta rama usaba la posicion ACTUAL del
+    // original (`srcPos`, ya reposicionado sobre el borde del circulo por
+    // la creacion inicial -- ver mas abajo en `arrayApplyBtn`) como si
+    // fuera el CENTRO del circulo para recalcular las copias, cada vez que
+    // se tocaba un control (cantidad/radio) en Atributos. Como el original
+    // ya estaba sobre el borde (no en el centro de verdad), cada
+    // recalculo armaba un circulo nuevo centrado en ESE punto del borde en
+    // vez del centro real -- un circulo corrido, no concentrico con el
+    // anterior -- y ademas nunca volvia a mover al original a su lugar en
+    // el circulo nuevo (se quedaba pegado en su ultima posicion). Repetido
+    // en varios toques de slider, el patron se iba deformando cada vez
+    // mas. Se guarda ahora un CENTRO fijo (`clonerEntry.circleCenter`,
+    // en espacio mundo, calculado una sola vez al crear el clonador -- ver
+    // `arrayApplyBtn`) y el EJE elegido (`clonerEntry.clonerAxis`) para que
+    // cualquier recalculo posterior arme el circulo alrededor del mismo
+    // centro de siempre, sea cual sea la posicion actual del original -- y
+    // se reposiciona el original en cada recalculo (como si fuera un item
+    // mas del circulo, en el angulo 0) para que quede de verdad sobre el
+    // borde, no solo las copias.
     const radius = clonerEntry.radius != null ? clonerEntry.radius : 120;
+    const axis = clonerEntry.clonerAxis || 'y';
+    // Auto-reparacion para clonadores circulares guardados ANTES de que
+    // existiera `circleCenter` (diseños viejos): se toma la posicion actual
+    // del original como centro esta primera vez y se guarda, para que de
+    // ahi en mas ya no siga corriendose con cada edicion.
+    if (!clonerEntry.circleCenter) {
+      clonerEntry.circleCenter = { x: srcPos.x, y: srcPos.y, z: srcPos.z };
+    }
+    const center = new THREE.Vector3(clonerEntry.circleCenter.x, clonerEntry.circleCenter.y, clonerEntry.circleCenter.z);
     const total = count + 1;
     const angleStep = (Math.PI * 2) / total;
+
+    // El original ocupa el angulo 0 del circulo -- se reposiciona en cada
+    // recalculo (radio/cantidad pueden haber cambiado desde la ultima vez).
+    const slot0World = circularSlotPosition(center, axis, radius, 0);
+    src.mesh.position.copy(clonerEntry.mesh.worldToLocal(slot0World));
+
     for (let i = 1; i < total; i++) {
       const a = angleStep * i;
-      const pos = new THREE.Vector3(srcPos.x + Math.cos(a) * radius, srcPos.y, srcPos.z + Math.sin(a) * radius);
+      const pos = circularSlotPosition(center, axis, radius, a);
       const newId = cloneEntryAt(src, pos);
       const e = sceneObjects.get(newId);
       if (e) {
-        if (clonerEntry.rotCopies !== false) e.mesh.rotation.y = src.mesh.rotation.y + a;
+        if (clonerEntry.rotCopies !== false) {
+          if (axis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
+          else if (axis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + a;
+          else e.mesh.rotation.y = src.mesh.rotation.y + a;
+        }
         clonerEntry.mesh.attach(e.mesh);
         e.parentId = clonerEntry.id;
         clonerEntry.clonerChildIds.push(newId);
@@ -2986,6 +3039,8 @@ function snapshotScene() {
       sepZ: e.sepZ != null ? e.sepZ : null,
       radius: e.radius != null ? e.radius : null,
       rotCopies: e.rotCopies != null ? e.rotCopies : null,
+      clonerAxis: e.clonerAxis || null,
+      circleCenter: e.circleCenter ? { x: e.circleCenter.x, y: e.circleCenter.y, z: e.circleCenter.z } : null,
       symmetrySourceId: e.symmetrySourceId != null ? e.symmetrySourceId : null,
       symAxis: e.symAxis || null,
       symOffset: e.symOffset != null ? e.symOffset : null,
@@ -3075,6 +3130,8 @@ function rebuildSceneFrom(snap) {
       clonerChildIds: s.clonerChildIds ? [...s.clonerChildIds] : null,
       sepX: s.sepX, sepY: s.sepY, sepZ: s.sepZ,
       radius: s.radius, rotCopies: s.rotCopies,
+      clonerAxis: s.clonerAxis || null,
+      circleCenter: s.circleCenter ? { x: s.circleCenter.x, y: s.circleCenter.y, z: s.circleCenter.z } : null,
       symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
       symAxis: s.symAxis, symOffset: s.symOffset,
       isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
@@ -4713,15 +4770,20 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
     });
   } else {
     const origPos = posAttr.array.slice();
+    // Guarda, por vertice, cuanto "peso" (falloff) le toco en este trazo --
+    // se reusa abajo para la pasada de relajado, en vez de recalcularlo.
+    const touchedFalloff = new Float32Array(count);
     for (let i = 0; i < count; i++) {
       const vx = origPos[i * 3], vy = origPos[i * 3 + 1], vz = origPos[i * 3 + 2];
       let totalDx = 0, totalDy = 0, totalDz = 0;
+      let maxFalloff = 0;
       centers.forEach(c => {
         const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dist > radius) return;
         const t = 1 - dist / radius;
         const falloff = t * t * (3 - 2 * t);
+        if (falloff > maxFalloff) maxFalloff = falloff;
         if (brush === 'pinch') {
           const k = falloff * strength * 0.08;
           totalDx += (c.pt.x - vx) * k;
@@ -4741,6 +4803,44 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
       if (totalDx !== 0 || totalDy !== 0 || totalDz !== 0) {
         posAttr.setXYZ(i, vx + totalDx, vy + totalDy, vz + totalDz);
       }
+      touchedFalloff[i] = maxFalloff;
+    }
+
+    // Relajado automatico (reporte de Andres: "se rompe si modificas
+    // mucho, no tienen que seguir las mallas rellenandose?"): esta app no
+    // tiene subdivision dinamica -- Empujar/Hundir/Pellizcar solo MUEVEN
+    // los vertices que ya existen, nunca agregan mas malla. Estirar una
+    // zona chica muy lejos de su forma original (una "oreja" arrastrando
+    // el lapiz, o pasando muchas veces por el mismo lugar) hace que esos
+    // pocos vertices formen triangulos cada vez mas finos y estirados
+    // respecto de sus vecinos que quedaron atras sin moverse -- en algun
+    // punto se pliegan sobre si mismos o sobre el resto de la figura, lo
+    // que se ve como una "aleta" rota o un hueco (no es un agujero de
+    // verdad, es la propia malla doblada mostrando su cara de adentro).
+    // Sin agregar malla nueva (remesh de verdad, un cambio grande, no
+    // esta ronda), lo que SI se puede hacer es que cada trazo relaje un
+    // poco la zona tocada hacia el promedio de sus vecinos -- como un
+    // "Suavizar" chiquito mezclado en cada Empujar/Hundir/Pellizcar --
+    // asi la zona estirada se reparte mas parecido a como se rellenaria
+    // con mas malla, en vez de quedar una punta finita y aislada. No
+    // reemplaza una subdivision de verdad (el limite de "cuanta malla hay
+    // para trabajar" sigue estando ahi), pero evita que una zona muy
+    // estirada se vea rota/plegada.
+    const RELAX_AMOUNT = 0.18;
+    const adj = getAdjacency(geo);
+    const afterStroke = posAttr.array.slice();
+    for (let i = 0; i < count; i++) {
+      const w = touchedFalloff[i];
+      if (w <= 0) continue;
+      const neighbors = adj[i];
+      if (!neighbors || neighbors.size === 0) continue;
+      let ax = 0, ay = 0, az = 0;
+      neighbors.forEach(n => { ax += afterStroke[n * 3]; ay += afterStroke[n * 3 + 1]; az += afterStroke[n * 3 + 2]; });
+      const cnt = neighbors.size;
+      ax /= cnt; ay /= cnt; az /= cnt;
+      const vx = afterStroke[i * 3], vy = afterStroke[i * 3 + 1], vz = afterStroke[i * 3 + 2];
+      const k = w * RELAX_AMOUNT;
+      posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
     }
   }
 
@@ -5474,20 +5574,22 @@ if (arrayApplyBtn) {
       const total    = count + 1; // include original position
       const angleStep = (Math.PI * 2) / total;
 
+      // El centro de VERDAD del circulo es donde estaba el original ANTES
+      // de repositionarlo (srcPos, todavia sin tocar aca abajo) -- se
+      // guarda tal cual en el clonador (`circleCenter`, mundo) junto con el
+      // eje elegido (`clonerAxis`) para que updateClonerLive() pueda volver
+      // a armar el mismo circulo mas adelante (al tocar cantidad/radio en
+      // Atributos) sin perder de referencia donde esta el centro real --
+      // ver el comentario largo en updateClonerLive sobre el bug de "queda
+      // una al medio" que pasaba antes de guardar esto.
+      const circleCenter = srcPos.clone();
+
       // Reposition the original to first slot on the circle
-      const angle0 = 0;
-      const firstPos = srcPos.clone();
-      if (axis === 'y') { firstPos.x = srcPos.x + Math.cos(angle0) * radius; firstPos.z = srcPos.z + Math.sin(angle0) * radius; }
-      else if (axis === 'x') { firstPos.y = srcPos.y + Math.cos(angle0) * radius; firstPos.z = srcPos.z + Math.sin(angle0) * radius; }
-      else { firstPos.x = srcPos.x + Math.cos(angle0) * radius; firstPos.y = srcPos.y + Math.sin(angle0) * radius; }
-      src.mesh.position.copy(firstPos);
+      src.mesh.position.copy(circularSlotPosition(circleCenter, axis, radius, 0));
 
       for (let i = 1; i < total; i++) {
         const a = angleStep * i;
-        const pos = srcPos.clone();
-        if (axis === 'y') { pos.x = srcPos.x + Math.cos(a) * radius; pos.z = srcPos.z + Math.sin(a) * radius; }
-        else if (axis === 'x') { pos.y = srcPos.y + Math.cos(a) * radius; pos.z = srcPos.z + Math.sin(a) * radius; }
-        else { pos.x = srcPos.x + Math.cos(a) * radius; pos.y = srcPos.y + Math.sin(a) * radius; }
+        const pos = circularSlotPosition(circleCenter, axis, radius, a);
         const newId = cloneEntryAt(src, pos);
         if (doRotate) {
           const e = sceneObjects.get(newId);
@@ -5505,7 +5607,9 @@ if (arrayApplyBtn) {
         clonerSourceId: selectedId,
         clonerChildIds: createdIds.filter(id => id !== selectedId),
         radius: radius,
-        rotCopies: doRotate
+        rotCopies: doRotate,
+        clonerAxis: axis,
+        circleCenter: { x: circleCenter.x, y: circleCenter.y, z: circleCenter.z }
       });
       renderLayerList();
       selectObject(nullId);
