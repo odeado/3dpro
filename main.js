@@ -1169,8 +1169,13 @@ function selectObject(id) {
         const clonerRadiusInput = document.getElementById('clonerRadiusInput');
         const clonerRadiusVal = document.getElementById('clonerRadiusVal');
         const clonerRotCheck = document.getElementById('clonerRotCheck');
+        const clonerRotAxisSelect = document.getElementById('clonerRotAxisSelect');
         const clonerLinearRow = document.getElementById('clonerLinearRow');
         const clonerCircularRow = document.getElementById('clonerCircularRow');
+        const clonerGridRow = document.getElementById('clonerGridRow');
+        const clonerGridRotInput = document.getElementById('clonerGridRotInput');
+        const clonerGridRotVal = document.getElementById('clonerGridRotVal');
+        const clonerGridRotAxisSelect = document.getElementById('clonerGridRotAxisSelect');
 
         if (clonerModeSelect) clonerModeSelect.value = clonerEntry.clonerMode || 'linear';
         if (clonerCountInput) clonerCountInput.value = clonerEntry.clonerCount || 3;
@@ -1181,10 +1186,19 @@ function selectObject(id) {
         if (clonerRadiusInput) clonerRadiusInput.value = clonerEntry.radius != null ? clonerEntry.radius : 120;
         if (clonerRadiusVal) clonerRadiusVal.textContent = clonerEntry.radius != null ? clonerEntry.radius : 120;
         if (clonerRotCheck) clonerRotCheck.checked = clonerEntry.rotCopies !== false;
+        // Eje de giro de cada copia circular: independiente del eje del
+        // circulo (clonerAxis) -- si el diseño es viejo y todavia no tiene
+        // este campo guardado, se muestra el mismo eje del circulo (el
+        // comportamiento de siempre) en vez de forzar "Y".
+        if (clonerRotAxisSelect) clonerRotAxisSelect.value = clonerEntry.clonerRotAxis || clonerEntry.clonerAxis || 'y';
+        if (clonerGridRotInput) clonerGridRotInput.value = clonerEntry.gridRotDeg || 0;
+        if (clonerGridRotVal) clonerGridRotVal.textContent = clonerEntry.gridRotDeg || 0;
+        if (clonerGridRotAxisSelect) clonerGridRotAxisSelect.value = clonerEntry.gridRotAxis || 'y';
 
-        const isLinear = (clonerEntry.clonerMode || 'linear') === 'linear';
-        if (clonerLinearRow) clonerLinearRow.style.display = isLinear ? 'flex' : 'none';
-        if (clonerCircularRow) clonerCircularRow.style.display = isLinear ? 'none' : 'flex';
+        const modeNow = clonerEntry.clonerMode || 'linear';
+        if (clonerLinearRow) clonerLinearRow.style.display = modeNow === 'linear' ? 'flex' : 'none';
+        if (clonerCircularRow) clonerCircularRow.style.display = modeNow === 'circular' ? 'flex' : 'none';
+        if (clonerGridRow) clonerGridRow.style.display = modeNow === 'grid' ? 'flex' : 'none';
       }
     }
 
@@ -2377,6 +2391,14 @@ function updateClonerLive(clonerEntry) {
     // borde, no solo las copias.
     const radius = clonerEntry.radius != null ? clonerEntry.radius : 120;
     const axis = clonerEntry.clonerAxis || 'y';
+    // Reporte de Andres ("deben estar todas girando... mismo sentido, para
+    // crear como petalo"): el eje sobre el que gira CADA copia (para que
+    // apunte "hacia afuera" del circulo, como un petalo) ahora se puede
+    // elegir aparte del eje del PLANO del circulo (`axis`, de arriba) --
+    // antes estaban forzados a ser el mismo eje. Un diseño guardado ANTES
+    // de que existiera este campo (`clonerRotAxis`) sigue usando el eje del
+    // circulo como hacia siempre (mismo resultado que antes, sin sorpresas).
+    const rotAxis = clonerEntry.clonerRotAxis || axis;
     // Auto-reparacion para clonadores circulares guardados ANTES de que
     // existiera `circleCenter` (diseños viejos): se toma la posicion actual
     // del original como centro esta primera vez y se guarda, para que de
@@ -2400,8 +2422,8 @@ function updateClonerLive(clonerEntry) {
       const e = sceneObjects.get(newId);
       if (e) {
         if (clonerEntry.rotCopies !== false) {
-          if (axis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
-          else if (axis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + a;
+          if (rotAxis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
+          else if (rotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + a;
           else e.mesh.rotation.y = src.mesh.rotation.y + a;
         }
         clonerEntry.mesh.attach(e.mesh);
@@ -2416,6 +2438,13 @@ function updateClonerLive(clonerEntry) {
     const sx = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
     const sy = clonerEntry.sepY != null ? clonerEntry.sepY : 80;
     const sz = clonerEntry.sepZ != null ? clonerEntry.sepZ : 80;
+    // Reporte de Andres: tambien pidio poder girar las copias de la
+    // Cuadricula, pero con UN SOLO giro fijo igual para todas (no un giro
+    // progresivo/espiral) -- por eso se suma el mismo `rotRad` a cada copia,
+    // nunca multiplicado por su indice.
+    const rotDeg = clonerEntry.gridRotDeg || 0;
+    const rotAxis = clonerEntry.gridRotAxis || 'y';
+    const rotRad = rotDeg * Math.PI / 180;
     const startX = srcPos.x - (gx - 1) * sx / 2;
     const startY = srcPos.y;
     const startZ = srcPos.z - (gz - 1) * sz / 2;
@@ -2428,6 +2457,11 @@ function updateClonerLive(clonerEntry) {
           const newId = cloneEntryAt(src, pos);
           const e = sceneObjects.get(newId);
           if (e) {
+            if (rotRad) {
+              if (rotAxis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + rotRad;
+              else if (rotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + rotRad;
+              else e.mesh.rotation.y = src.mesh.rotation.y + rotRad;
+            }
             clonerEntry.mesh.attach(e.mesh);
             e.parentId = clonerEntry.id;
             clonerEntry.clonerChildIds.push(newId);
@@ -2526,6 +2560,10 @@ const clonerSepZ = document.getElementById('clonerSepZ');
 const clonerRadiusInput = document.getElementById('clonerRadiusInput');
 const clonerRadiusVal = document.getElementById('clonerRadiusVal');
 const clonerRotCheck = document.getElementById('clonerRotCheck');
+const clonerRotAxisSelect = document.getElementById('clonerRotAxisSelect');
+const clonerGridRotInput = document.getElementById('clonerGridRotInput');
+const clonerGridRotVal = document.getElementById('clonerGridRotVal');
+const clonerGridRotAxisSelect = document.getElementById('clonerGridRotAxisSelect');
 const clonerBakeBtn = document.getElementById('clonerBakeBtn');
 
 if (clonerModeSelect) {
@@ -2533,11 +2571,12 @@ if (clonerModeSelect) {
     const cloner = getActiveCloner();
     if (!cloner) return;
     cloner.clonerMode = clonerModeSelect.value;
-    const isLinear = cloner.clonerMode === 'linear';
     const clonerLinearRow = document.getElementById('clonerLinearRow');
     const clonerCircularRow = document.getElementById('clonerCircularRow');
-    if (clonerLinearRow) clonerLinearRow.style.display = isLinear ? 'flex' : 'none';
-    if (clonerCircularRow) clonerCircularRow.style.display = isLinear ? 'none' : 'flex';
+    const clonerGridRow = document.getElementById('clonerGridRow');
+    if (clonerLinearRow) clonerLinearRow.style.display = cloner.clonerMode === 'linear' ? 'flex' : 'none';
+    if (clonerCircularRow) clonerCircularRow.style.display = cloner.clonerMode === 'circular' ? 'flex' : 'none';
+    if (clonerGridRow) clonerGridRow.style.display = cloner.clonerMode === 'grid' ? 'flex' : 'none';
     updateClonerLive(cloner);
     pushHistory();
   });
@@ -2772,6 +2811,37 @@ if (clonerRotCheck) {
     const cloner = getActiveCloner();
     if (!cloner) return;
     cloner.rotCopies = clonerRotCheck.checked;
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
+
+if (clonerRotAxisSelect) {
+  clonerRotAxisSelect.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.clonerRotAxis = clonerRotAxisSelect.value;
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
+
+if (clonerGridRotInput) {
+  clonerGridRotInput.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.gridRotDeg = parseFloat(clonerGridRotInput.value) || 0;
+    if (clonerGridRotVal) clonerGridRotVal.textContent = cloner.gridRotDeg;
+    updateClonerLive(cloner);
+  });
+  clonerGridRotInput.addEventListener('change', () => pushHistory());
+}
+
+if (clonerGridRotAxisSelect) {
+  clonerGridRotAxisSelect.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.gridRotAxis = clonerGridRotAxisSelect.value;
     updateClonerLive(cloner);
     pushHistory();
   });
@@ -3040,7 +3110,17 @@ function snapshotScene() {
       radius: e.radius != null ? e.radius : null,
       rotCopies: e.rotCopies != null ? e.rotCopies : null,
       clonerAxis: e.clonerAxis || null,
+      clonerRotAxis: e.clonerRotAxis || null,
       circleCenter: e.circleCenter ? { x: e.circleCenter.x, y: e.circleCenter.y, z: e.circleCenter.z } : null,
+      // gridX/Y/Z quedaban SIN guardar antes de este arreglo -- un
+      // clonador en modo Cuadricula perdia sus filas/columnas/pisos (volvia
+      // a 3x1x3 por defecto) apenas se deshacia (Ctrl+Z) o se guardaba y
+      // cargaba el diseño otra vez.
+      gridX: e.gridX != null ? e.gridX : null,
+      gridY: e.gridY != null ? e.gridY : null,
+      gridZ: e.gridZ != null ? e.gridZ : null,
+      gridRotDeg: e.gridRotDeg != null ? e.gridRotDeg : null,
+      gridRotAxis: e.gridRotAxis || null,
       symmetrySourceId: e.symmetrySourceId != null ? e.symmetrySourceId : null,
       symAxis: e.symAxis || null,
       symOffset: e.symOffset != null ? e.symOffset : null,
@@ -3131,7 +3211,13 @@ function rebuildSceneFrom(snap) {
       sepX: s.sepX, sepY: s.sepY, sepZ: s.sepZ,
       radius: s.radius, rotCopies: s.rotCopies,
       clonerAxis: s.clonerAxis || null,
+      clonerRotAxis: s.clonerRotAxis || null,
       circleCenter: s.circleCenter ? { x: s.circleCenter.x, y: s.circleCenter.y, z: s.circleCenter.z } : null,
+      gridX: s.gridX != null ? s.gridX : null,
+      gridY: s.gridY != null ? s.gridY : null,
+      gridZ: s.gridZ != null ? s.gridZ : null,
+      gridRotDeg: s.gridRotDeg != null ? s.gridRotDeg : null,
+      gridRotAxis: s.gridRotAxis || null,
       symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
       symAxis: s.symAxis, symOffset: s.symOffset,
       isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
@@ -5415,8 +5501,6 @@ function animate() {
 }
 animate();
 
-
-
 syncCanvasTop(); // deja el alto del canvas acorde a la barra de arriba (2 o 3 filas) y los limites de orthoCam listos
 setView('perspective');
 pushHistory(); // estado inicial (escena vacía), para poder deshacer hasta el principio
@@ -5571,6 +5655,12 @@ if (arrayApplyBtn) {
       const radius   = parseFloat(document.getElementById('arrayRadius').value) || 120;
       const axis     = document.getElementById('arrayAxis').value;
       const doRotate = document.getElementById('arrayRotateCopies').checked;
+      // Eje de giro de cada copia -- elegible aparte del eje del PLANO del
+      // circulo (`axis`, de arriba), para poder armar un "petalo" sin que
+      // el giro de cada figura tenga que coincidir con como esta acostado
+      // el circulo.
+      const rotAxisEl = document.getElementById('arrayRotAxis');
+      const rotAxis  = rotAxisEl ? rotAxisEl.value : axis;
       const total    = count + 1; // include original position
       const angleStep = (Math.PI * 2) / total;
 
@@ -5594,9 +5684,9 @@ if (arrayApplyBtn) {
         if (doRotate) {
           const e = sceneObjects.get(newId);
           if (e) {
-            if (axis === 'y') e.mesh.rotation.y = src.mesh.rotation.y + a;
-            else if (axis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
-            else e.mesh.rotation.z = src.mesh.rotation.z + a;
+            if (rotAxis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + a;
+            else if (rotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + a;
+            else e.mesh.rotation.y = src.mesh.rotation.y + a;
           }
         }
         createdIds.push(newId);
@@ -5609,6 +5699,7 @@ if (arrayApplyBtn) {
         radius: radius,
         rotCopies: doRotate,
         clonerAxis: axis,
+        clonerRotAxis: rotAxis,
         circleCenter: { x: circleCenter.x, y: circleCenter.y, z: circleCenter.z }
       });
       renderLayerList();
@@ -5622,6 +5713,13 @@ if (arrayApplyBtn) {
       const sx = parseFloat(document.getElementById('arrayGridSepX').value) || 80;
       const sz = parseFloat(document.getElementById('arrayGridSepZ').value) || 80;
       const sy = parseFloat(document.getElementById('arrayGridSepY').value) || 80;
+      // Girar cada copia de la cuadricula un mismo angulo fijo (como
+      // petalos) -- se aplica igual a todas, nunca progresivo/en espiral.
+      const gridRotDegEl = document.getElementById('arrayGridRotDeg');
+      const gridRotAxisEl = document.getElementById('arrayGridRotAxis');
+      const gridRotDeg = gridRotDegEl ? (parseFloat(gridRotDegEl.value) || 0) : 0;
+      const gridRotAxis = gridRotAxisEl ? gridRotAxisEl.value : 'y';
+      const gridRotRad = gridRotDeg * Math.PI / 180;
       // Center the grid around the original
       const startX = srcPos.x - (gx - 1) * sx / 2;
       const startY = srcPos.y;
@@ -5632,7 +5730,16 @@ if (arrayApplyBtn) {
           for (let ix = 0; ix < gx; ix++) {
             const pos = new THREE.Vector3(startX + ix * sx, startY + iy * sy, startZ + iz * sz);
             if (first) { src.mesh.position.copy(pos); first = false; continue; }
-            createdIds.push(cloneEntryAt(src, pos));
+            const newId = cloneEntryAt(src, pos);
+            if (gridRotRad) {
+              const e = sceneObjects.get(newId);
+              if (e) {
+                if (gridRotAxis === 'x') e.mesh.rotation.x = src.mesh.rotation.x + gridRotRad;
+                else if (gridRotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + gridRotRad;
+                else e.mesh.rotation.y = src.mesh.rotation.y + gridRotRad;
+              }
+            }
+            createdIds.push(newId);
           }
         }
       }
@@ -5646,7 +5753,9 @@ if (arrayApplyBtn) {
         sepZ: sz,
         gridX: gx,
         gridY: gy,
-        gridZ: gz
+        gridZ: gz,
+        gridRotDeg: gridRotDeg,
+        gridRotAxis: gridRotAxis
       });
       renderLayerList();
       selectObject(nullId);

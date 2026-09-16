@@ -717,6 +717,22 @@
               <label>Radio: <span id="clonerRadiusVal">120</span> mm</label>
               <input id="clonerRadiusInput" type="range" min="20" max="400" step="5" value="120">
               <label style="margin-top:4px;"><input id="clonerRotCheck" type="checkbox" checked> Rotar copias en círculo</label>
+              <label style="margin-top:8px; display:block;">Eje de giro de cada copia</label>
+              <select id="clonerRotAxisSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="y">Y (horizontal)</option>
+                <option value="x">X</option>
+                <option value="z">Z</option>
+              </select>
+            </div>
+            <div class="prop-row" id="clonerGridRow" style="display:none;">
+              <label>Girar cada copia: <span id="clonerGridRotVal">0</span>°</label>
+              <input id="clonerGridRotInput" type="range" min="0" max="360" step="5" value="0">
+              <label style="margin-top:8px; display:block;">Eje de giro</label>
+              <select id="clonerGridRotAxisSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
+                <option value="y">Y (horizontal)</option>
+                <option value="x">X</option>
+                <option value="z">Z</option>
+              </select>
             </div>
             <button id="clonerBakeBtn" class="context-btn" style="justify-content:center;">⚡ Convertir a Objetos Fijos</button>
           </div>
@@ -940,6 +956,13 @@
           </select>
         </div>
         <div class="modal-field"><label>Rotar copias también (°)</label><input id="arrayRotateCopies" type="checkbox" checked style="width:auto;"></div>
+        <div class="modal-field"><label>Eje de giro de cada copia</label>
+          <select id="arrayRotAxis">
+            <option value="y">Y (horizontal)</option>
+            <option value="x">X</option>
+            <option value="z">Z</option>
+          </select>
+        </div>
       </div>
 
       <!-- GRID options -->
@@ -955,6 +978,17 @@
           <div class="modal-field"><label>Sep Z</label><input id="arrayGridSepZ" type="number" value="80" step="10"></div>
         </div>
         <div class="modal-field"><label>Sep Y</label><input id="arrayGridSepY" type="number" value="80" step="10"></div>
+        <p style="color:#5c6370; font-size:11px; margin:8px 0 0;">Girar cada copia (mismo giro fijo en todas, como pétalos):</p>
+        <div class="modal-row2">
+          <div class="modal-field"><label>Grados (°)</label><input id="arrayGridRotDeg" type="number" value="0" step="5"></div>
+          <div class="modal-field"><label>Eje</label>
+            <select id="arrayGridRotAxis">
+              <option value="y">Y</option>
+              <option value="x">X</option>
+              <option value="z">Z</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:4px;">
