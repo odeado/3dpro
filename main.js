@@ -305,26 +305,59 @@ function buildTaperedTubeGeometry(points, rootRadius, tipRadius, radialSegments 
   return geo;
 }
 
+// Recorre 'points' (una lista de puntos con .clone(), Vector2 o Vector3)
+// tramo por tramo y arma una lista MAS FINA de puntos siguiendo el
+// contorno: por defecto pasa LISO (Catmull-Rom, bisel redondo) por cada
+// punto, pero si 'sharp[i]' es true para uno de los dos puntos de un
+// tramo, ESE tramo sale como linea RECTA -- asi un punto marcado "esquina
+// dura" no se redondea, igual que el punto "corner" de un editor de
+// vectores tipo Illustrator (a diferencia del punto "smooth" que sigue
+// curvando liso). Sirve tanto para la linea guia de la Curva como para el
+// contorno que arma la Extrusion -- por eso trabaja en generico, no sabe
+// nada de "spline" ni de "extrude".
+function sampleCurveWithCorners(points, closed, sharp, samplesPerSeg) {
+  const n = points.length;
+  if (n < 2) return points.map(p => p.clone());
+  samplesPerSeg = samplesPerSeg || 8;
+  const at = (i) => closed ? points[((i % n) + n) % n] : points[Math.max(0, Math.min(n - 1, i))];
+  const isSharp = (i) => !!(sharp && sharp[((i % n) + n) % n]);
+  const segCount = closed ? n : n - 1;
+  const out = [];
+  for (let i = 0; i < segCount; i++) {
+    const p0 = at(i), p1 = at(i + 1);
+    if (isSharp(i) || isSharp(i + 1)) {
+      // Esquina dura de cualquiera de los dos extremos del tramo: recto.
+      out.push(p0.clone());
+    } else {
+      // Los dos extremos son "lisos": se arma un Catmull-Rom local con los
+      // 2 vecinos de cada lado y se toma SOLO el tramo del medio (p0->p1),
+      // que corresponde a t en [1/3, 2/3) cuando se le pasan 4 puntos.
+      const local = new THREE.CatmullRomCurve3([at(i - 1).clone(), p0.clone(), p1.clone(), at(i + 2).clone()], false);
+      for (let s = 0; s < samplesPerSeg; s++) {
+        out.push(local.getPoint((1 / 3) + (s / samplesPerSeg) * (1 / 3)));
+      }
+    }
+  }
+  out.push((closed ? at(0) : at(segCount)).clone());
+  return out;
+}
+
 // Una Curva/Spline TODAVIA SIN CONVERTIR no es una figura solida de verdad
 // -- es solo una guia, igual que en Cinema4D/Blender se ve como una linea
 // finita, no como un tubo grueso. Esta funcion arma esa geometria de linea
-// (suavizada con el mismo Catmull-Rom que ya usa el resto del Spline);
-// "closed" la cierra en loop (para poder usarla con el generador de
-// Extrusion). Se usa tanto para el trazo en construccion como para el
-// objeto 'spline' ya terminado -- y se vuelve a llamar cada vez que se
-// arrastra/agrega/saca un punto.
-function buildSplineLineGeometry(points, closed) {
+// (suavizada con el mismo Catmull-Rom que ya usa el resto del Spline,
+// salvo en los puntos marcados como "esquina dura" via 'sharp' -- ver
+// sampleCurveWithCorners); "closed" la cierra en loop (para poder usarla
+// con el generador de Extrusion). Se usa tanto para el trazo en
+// construccion como para el objeto 'spline' ya terminado -- y se vuelve a
+// llamar cada vez que se arrastra/agrega/saca un punto o se cambia si un
+// punto es esquina dura o lisa.
+function buildSplineLineGeometry(points, closed, sharp) {
   if (!points || points.length < 2) {
     const pts = points && points.length === 1 ? [points[0].clone(), points[0].clone()] : [];
     return new THREE.BufferGeometry().setFromPoints(pts);
   }
-  const curve = new THREE.CatmullRomCurve3(points, !!closed);
-  const count = Math.max(24, points.length * 8);
-  const spaced = curve.getSpacedPoints(count);
-  // Cierra el loop dibujando de vuelta hasta el primer punto -- asi no hace
-  // falta un THREE.LineLoop aparte (que obligaria a recrear el objeto cada
-  // vez que se prende/apaga "Cerrar Curva"), un THREE.Line comun alcanza.
-  if (closed) spaced.push(spaced[0].clone());
+  const spaced = sampleCurveWithCorners(points, !!closed, sharp, 8);
   return new THREE.BufferGeometry().setFromPoints(spaced);
 }
 
@@ -561,7 +594,7 @@ function cloneObject(id) {
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, closed: !!src.closed, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, splineSharp: src.splineSharp ? src.splineSharp.slice() : undefined, closed: !!src.closed, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -847,6 +880,7 @@ function updateTransformInputs() {
     if (!entry) return;
     const val = parseFloat(inp.value);
     if (!isNaN(val)) entry.mesh.position[axes[idx]] = val;
+    refreshSplinePointHandles(); // si se esta editando una Curva/Revolucion/Tubo/Extrusion, sus bolitas tienen que seguir a la figura tambien al mover por numero (mismo motivo que Centrar/Al suelo)
   });
   inp.addEventListener('change', () => pushHistory());
 });
@@ -860,6 +894,7 @@ function updateTransformInputs() {
     if (!entry) return;
     const val = parseFloat(inp.value);
     if (!isNaN(val)) entry.mesh.rotation[axes[idx]] = THREE.MathUtils.degToRad(val);
+    refreshSplinePointHandles();
   });
   inp.addEventListener('change', () => pushHistory());
 });
@@ -895,6 +930,7 @@ function updateTransformInputs() {
       }
       updateTransformInputs();
       updateHandles(selectedId);
+      refreshSplinePointHandles();
     }
   });
   inp.addEventListener('change', () => pushHistory());
@@ -1186,6 +1222,7 @@ alignOriginBtn.addEventListener('click', () => {
   entry.mesh.position.x = 0;
   entry.mesh.position.z = 0;
   updateHandles(selectedId); // los tiradores de Escalar quedan pegados a las caras -- si no se refrescan, se quedan flotando en el lugar viejo
+  refreshSplinePointHandles(); // las bolitas de editar puntos de una Curva/Revolucion/Tubo/Extrusion tambien quedan pegadas al lugar viejo si no se refrescan (mismo motivo que los tiradores de Escalar)
   pushHistory();
 });
 
@@ -1197,6 +1234,7 @@ alignGroundBtn.addEventListener('click', () => {
   const minY = box.min.y;
   entry.mesh.position.y -= minY;
   updateHandles(selectedId);
+  refreshSplinePointHandles();
   pushHistory();
 });
 
@@ -1250,6 +1288,16 @@ function setPivot(id, alignX, alignY, alignZ) {
       geo.computeVertexNormals();
       entry.sculpted = true; // Guarda los vértices modificados en el snapshot
 
+      // Si es una Curva/Revolucion/Tubo/Extrusion, sus puntos de control
+      // (entry.splinePoints) tambien estan en espacio LOCAL -- si no se
+      // corren junto con la geometria, quedan desalineados del nuevo
+      // origen y la proxima vez que se arrastre/agregue/saque un punto
+      // (regenerateEntryFromPoints) el solido se reconstruye desde el
+      // origen VIEJO, haciendo que la figura "salte" de lugar.
+      if (entry.splinePoints) {
+        entry.splinePoints.forEach(p => p.sub(targetOffset));
+      }
+
       // Compensar la posición del objeto para que visualmente permanezca en su lugar exacto
       const deltaWorld = targetOffset.clone().applyEuler(entry.mesh.rotation).multiply(entry.mesh.scale);
       entry.mesh.position.add(deltaWorld);
@@ -1258,6 +1306,7 @@ function setPivot(id, alignX, alignY, alignZ) {
 
   syncTransformGizmo(entry);
   updateHandles(selectedId); // cambiar el pivote tambien mueve la figura -- refrescar los tiradores igual que en Centrar/Al suelo
+  refreshSplinePointHandles(); // idem para las bolitas de editar puntos de una Curva/Revolucion/Tubo/Extrusion
   updateTransformInputs();
   pushHistory();
 }
@@ -2667,6 +2716,7 @@ function snapshotScene() {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
       if (e.splinePoints) {
         s.splinePoints = e.splinePoints.map(p => [p.x, p.y, p.z]);
+        s.splineSharp = e.splineSharp ? e.splineSharp.slice() : e.splinePoints.map(() => false);
         s.closed = !!e.closed;
         s.latheSegments = e.latheSegments != null ? e.latheSegments : null;
         s.tubeRootRadius = e.tubeRootRadius != null ? e.tubeRootRadius : null;
@@ -2740,6 +2790,7 @@ function rebuildSceneFrom(snap) {
       symAxis: s.symAxis, symOffset: s.symOffset,
       isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
       splinePoints: s.splinePoints ? s.splinePoints.map(a => new THREE.Vector3(a[0], a[1], a[2])) : undefined,
+      splineSharp: s.splineSharp ? s.splineSharp.slice() : undefined,
       closed: !!s.closed,
       latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
       tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
@@ -3200,11 +3251,16 @@ function finishHairStroke() {
 // el Pelo por dentro.
 // =====================================================================
 let splinePoints = [];      // world-space, curva EN CONSTRUCCION (antes de "Finalizar Curva")
+let splineDraftSharp = [];  // paralelo a splinePoints: true = ese punto del trazo en construccion es esquina dura
 let splinePreviewMesh = null;
 let splineEditingId = null; // id del objeto (spline/lathe/tube/extrude) cuyos puntos se estan mostrando/editando ahora
+let activeSplinePointIndex = -1; // ultimo punto tocado/agregado (arrastrando o con "+ punto") -- a ese le aplica el toggle "Punto duro"
 const splinePointGroup = new THREE.Group();
 scene.add(splinePointGroup);
 let splinePointMeshes = [];
+const SPLINE_POINT_COLOR_FIRST = 0x88dd88;   // primer punto de la curva
+const SPLINE_POINT_COLOR_SMOOTH = 0xffcc44;  // punto liso (bisel redondo, el comportamiento de siempre)
+const SPLINE_POINT_COLOR_SHARP = 0xff6644;   // punto marcado como esquina dura (90 grados, sin curvar)
 
 // Guia del eje de Revolucion: una linea vertical punteada en X=0,Z=0 (con
 // una flechita en cada punta, como en Cinema4D) para que se entienda de un
@@ -3245,6 +3301,18 @@ const latheApplyBtn = document.getElementById('latheApplyBtn');
 // claro.
 function canEditSplinePoints(entry) {
   return !!(entry && entry.splinePoints && (entry.kind === 'spline' || entry.kind === 'lathe' || entry.kind === 'tube' || entry.kind === 'extrude'));
+}
+
+// Un diseño guardado ANTES de que existiera "Punto duro" (o clonado por el
+// Clonador de matriz, que no copia splineSharp -- ver cloneEntryAt) no
+// trae entry.splineSharp, o puede haber quedado mas corto/largo que
+// splinePoints tras agregar/sacar puntos en versiones viejas -- esto lo
+// arma/ajusta al vuelo (todo liso/false por defecto) antes de usarlo.
+function ensureSplineSharpArray(entry) {
+  if (!entry || !entry.splinePoints) return;
+  if (!entry.splineSharp) { entry.splineSharp = entry.splinePoints.map(() => false); return; }
+  while (entry.splineSharp.length < entry.splinePoints.length) entry.splineSharp.push(false);
+  if (entry.splineSharp.length > entry.splinePoints.length) entry.splineSharp.length = entry.splinePoints.length;
 }
 
 // La primera vez que se le aplica un generador a una Curva sin convertir,
@@ -3292,11 +3360,38 @@ function clearSplinePreview() {
 // resetea cada vez que se arranca un trazo nuevo.
 let splineDraftClosed = false;
 const splineClosedCheck = document.getElementById('splineClosedCheck');
+// El toggle "📐 Punto duro (90°)" -- ver syncSplineSharpCheckbox mas abajo.
+const splineSharpCheck = document.getElementById('splineSharpCheck');
+
+// Mientras se esta dibujando (antes de "Finalizar Curva"), se ve una
+// bolita por cada punto ya puesto -- antes solo se veia la LINEA
+// conectando todo, y era dificil saber donde habia quedado cada toque
+// exacto ("parece que haces a ciegas", reportado). Reusa el mismo grupo/
+// arreglo que refreshSplinePointHandles (splinePointGroup/splinePointMeshes)
+// porque nunca coinciden en el tiempo: esto se usa mientras se dibuja un
+// trazo nuevo (splineEditingId todavia null), lo otro mientras se edita
+// una curva ya existente.
+function refreshDraftPointHandles() {
+  clearSplinePointHandles();
+  splinePoints.forEach((p, i) => {
+    const sharp = !!splineDraftSharp[i];
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(6, 10, 8),
+      new THREE.MeshBasicMaterial({ color: i === 0 ? SPLINE_POINT_COLOR_FIRST : (sharp ? SPLINE_POINT_COLOR_SHARP : SPLINE_POINT_COLOR_SMOOTH), depthTest: false })
+    );
+    mesh.renderOrder = 999;
+    mesh.position.copy(p); // splinePoints ya esta en espacio MUNDO mientras se dibuja
+    mesh.userData.pointIndex = i;
+    splinePointGroup.add(mesh);
+    splinePointMeshes.push(mesh);
+  });
+}
 
 function updateSplinePreview() {
   if (splinePointCountEl) splinePointCountEl.textContent = splinePoints.length + ' punto' + (splinePoints.length === 1 ? '' : 's');
+  refreshDraftPointHandles();
   if (splinePoints.length < 2) return;
-  const geo = buildSplineLineGeometry(splinePoints, splineDraftClosed);
+  const geo = buildSplineLineGeometry(splinePoints, splineDraftClosed, splineDraftSharp);
   if (!splinePreviewMesh) {
     splinePreviewMesh = buildSplineLineObject(geo, SPLINE_DEFAULT_COLOR);
     scene.add(splinePreviewMesh);
@@ -3306,24 +3401,26 @@ function updateSplinePreview() {
   }
 }
 
-function createSplineObjectFromPoints(pts, closed) {
+function createSplineObjectFromPoints(pts, closed, sharp) {
   const origin = pts[0].clone();
   const localPoints = pts.map(p => p.clone().sub(origin));
-  const geo = buildSplineLineGeometry(localPoints, closed);
+  const sharpCopy = pts.map((_, i) => !!(sharp && sharp[i]));
+  const geo = buildSplineLineGeometry(localPoints, closed, sharpCopy);
   const mesh = buildSplineLineObject(geo, SPLINE_DEFAULT_COLOR);
   mesh.position.copy(origin);
   scene.add(mesh);
   const id = objIdCounter++;
   mesh.userData.ownerId = id;
-  sceneObjects.set(id, { id, kind: 'spline', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false, splinePoints: localPoints, closed: !!closed });
+  sceneObjects.set(id, { id, kind: 'spline', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false, splinePoints: localPoints, closed: !!closed, splineSharp: sharpCopy });
   return id;
 }
 
 function finishSplineDraw() {
   clearSplinePreview();
-  if (splinePoints.length < 2) { splinePoints = []; splineDraftClosed = false; if (splineClosedCheck) splineClosedCheck.checked = false; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
-  const id = createSplineObjectFromPoints(splinePoints, splineDraftClosed);
+  if (splinePoints.length < 2) { splinePoints = []; splineDraftSharp = []; splineDraftClosed = false; if (splineClosedCheck) splineClosedCheck.checked = false; updateSplinePreview(); if (splinePointCountEl) splinePointCountEl.textContent = ''; return; }
+  const id = createSplineObjectFromPoints(splinePoints, splineDraftClosed, splineDraftSharp);
   splinePoints = [];
+  splineDraftSharp = [];
   splineDraftClosed = false;
   if (splineClosedCheck) splineClosedCheck.checked = false;
   if (splinePointCountEl) splinePointCountEl.textContent = '';
@@ -3357,12 +3454,14 @@ function refreshSplinePointHandles() {
   if (splineEditingId == null) return;
   const entry = sceneObjects.get(splineEditingId);
   if (!canEditSplinePoints(entry)) { splineEditingId = null; return; }
+  ensureSplineSharpArray(entry);
   entry.mesh.updateMatrixWorld(true);
   entry.splinePoints.forEach((p, i) => {
     const world = p.clone().applyMatrix4(entry.mesh.matrixWorld);
+    const sharp = !!entry.splineSharp[i];
     const mesh = new THREE.Mesh(
       new THREE.SphereGeometry(6, 10, 8),
-      new THREE.MeshBasicMaterial({ color: i === 0 ? 0x88dd88 : 0xffcc44, depthTest: false })
+      new THREE.MeshBasicMaterial({ color: i === 0 ? SPLINE_POINT_COLOR_FIRST : (sharp ? SPLINE_POINT_COLOR_SHARP : SPLINE_POINT_COLOR_SMOOTH), depthTest: false })
     );
     mesh.renderOrder = 999;
     mesh.position.copy(world);
@@ -3374,14 +3473,18 @@ function refreshSplinePointHandles() {
 
 function startSplinePointEdit(id) {
   splineEditingId = id;
+  activeSplinePointIndex = -1;
   refreshSplinePointHandles();
   syncSplineClosedCheckbox();
+  syncSplineSharpCheckbox();
 }
 
 function stopSplinePointEdit() {
   splineEditingId = null;
+  activeSplinePointIndex = -1;
   clearSplinePointHandles();
   syncSplineClosedCheckbox();
+  syncSplineSharpCheckbox();
 }
 
 // El toggle "🔒 Cerrar Curva" refleja/edita distintas cosas segun el
@@ -3420,11 +3523,61 @@ if (splineClosedCheck) splineClosedCheck.addEventListener('change', () => {
   updateSplinePreview();
 });
 
+// El toggle "📐 Punto duro (90°)" aplica al ULTIMO punto tocado/agregado
+// (activeSplinePointIndex), no a la curva entera como "Cerrar Curva" --
+// cada punto tiene su propio bisel liso/duro. A diferencia de "Cerrar
+// Curva", esto SI tiene sentido para Revolucion/Tubo/Extrusion ya
+// convertidos (el perfil sigue siendo el mismo, solo cambia si se
+// redondea o no en ese punto) -- por eso usa canEditSplinePoints en vez
+// de exigir kind==='spline'. Se deshabilita solo si no hay ningun punto
+// activo todavia (recien entrando a editar, antes de tocar/agregar uno).
+function syncSplineSharpCheckbox() {
+  if (!splineSharpCheck) return;
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (entry && canEditSplinePoints(entry) && activeSplinePointIndex >= 0) {
+      ensureSplineSharpArray(entry);
+      splineSharpCheck.disabled = false;
+      splineSharpCheck.checked = !!entry.splineSharp[activeSplinePointIndex];
+      return;
+    }
+    splineSharpCheck.disabled = true;
+    splineSharpCheck.checked = false;
+    return;
+  }
+  // Todavia dibujando el trazo nuevo: aplica al ultimo punto puesto.
+  if (activeSplinePointIndex >= 0 && activeSplinePointIndex < splineDraftSharp.length) {
+    splineSharpCheck.disabled = false;
+    splineSharpCheck.checked = !!splineDraftSharp[activeSplinePointIndex];
+    return;
+  }
+  splineSharpCheck.disabled = true;
+  splineSharpCheck.checked = false;
+}
+if (splineSharpCheck) splineSharpCheck.addEventListener('change', () => {
+  if (activeSplinePointIndex < 0) return;
+  if (splineEditingId != null) {
+    const entry = sceneObjects.get(splineEditingId);
+    if (!entry || !canEditSplinePoints(entry)) return;
+    ensureSplineSharpArray(entry);
+    entry.splineSharp[activeSplinePointIndex] = splineSharpCheck.checked;
+    regenerateEntryFromPoints(entry);
+    refreshSplinePointHandles();
+    pushHistory();
+    return;
+  }
+  if (activeSplinePointIndex < splineDraftSharp.length) {
+    splineDraftSharp[activeSplinePointIndex] = splineSharpCheck.checked;
+    updateSplinePreview();
+  }
+});
+
 // Solo tiene sentido para una curva TODAVIA SIN CONVERTIR (kind 'spline'):
 // vuelve a armar su linea guia. Si ya se le aplico un generador, hay que
 // rehacer ESE generador en cambio -- ver regenerateEntryFromPoints().
 function rebuildSplineGeometry(entry) {
-  const geo = buildSplineLineGeometry(entry.splinePoints, entry.closed);
+  ensureSplineSharpArray(entry);
+  const geo = buildSplineLineGeometry(entry.splinePoints, entry.closed, entry.splineSharp);
   entry.mesh.geometry.dispose();
   entry.mesh.geometry = geo;
 }
@@ -3446,6 +3599,8 @@ let splineDragging = false;
 let splineDragPlane = null;
 function startSplinePointDrag(mesh, cam) {
   draggingSplinePointIndex = mesh.userData.pointIndex;
+  activeSplinePointIndex = mesh.userData.pointIndex; // ese punto queda "activo" para el toggle de Punto duro
+  syncSplineSharpCheckbox();
   splineDragging = true;
   orbit.enabled = false;
   // Se fija un plano que pasa por la posicion ACTUAL del punto, de frente
@@ -3494,8 +3649,11 @@ function stopSplinePointDrag() {
 function removeSplinePointAt(entry, index) {
   if (entry.splinePoints.length <= 2) return; // no dejar una curva con menos de 2 puntos
   entry.splinePoints.splice(index, 1);
+  if (entry.splineSharp) entry.splineSharp.splice(index, 1);
+  activeSplinePointIndex = -1; // los indices se corrieron -- no queda claro cual "seguia siendo" el mismo punto
   regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
+  syncSplineSharpCheckbox();
   pushHistory();
 }
 
@@ -3503,13 +3661,19 @@ function removeSplinePointAt(entry, index) {
 // si no hay ninguna bolita tocada pero se esta editando una curva ya
 // creada, el toque AGREGA un punto nuevo al final; si no hay ninguna curva
 // en edicion, el toque agrega un punto al trazo NUEVO que se esta armando.
+// Ojo: las bolitas SOLO son tocables (arrastrables) mientras se esta
+// EDITANDO una curva ya existente (splineEditingId != null) -- mientras
+// se esta DIBUJANDO un trazo nuevo tambien se ven bolitas (ver
+// refreshDraftPointHandles, para no "dibujar a ciegas"), pero son solo
+// una referencia visual: tocar cerca de una de ellas sigue agregando el
+// siguiente punto del trazo, no la arrastra.
 wrap.addEventListener('pointerdown', (e) => {
   if (toolMode !== 'spline') return;
   const { rect, cam } = getPointerRayContext(e.clientX, e.clientY);
   pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, cam);
-  const hits = raycaster.intersectObjects(splinePointMeshes, false);
+  const hits = (splineEditingId != null) ? raycaster.intersectObjects(splinePointMeshes, false) : [];
   if (hits.length > 0) {
     e.stopPropagation();
     startSplinePointDrag(hits[0].object, cam);
@@ -3521,6 +3685,9 @@ wrap.addEventListener('pointerdown', (e) => {
   }
   const p = nextHairPoint(e.clientX, e.clientY);
   splinePoints.push(p);
+  splineDraftSharp.push(false);
+  activeSplinePointIndex = splinePoints.length - 1; // el punto recien puesto queda "activo" para el toggle de Punto duro
+  syncSplineSharpCheckbox();
   updateSplinePreview();
 }, { capture: true });
 
@@ -3544,8 +3711,11 @@ function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
   if (!raycaster.ray.intersectPlane(plane, worldPoint)) return;
   const local = entry.mesh.worldToLocal(worldPoint);
   entry.splinePoints.push(local);
+  ensureSplineSharpArray(entry);
+  activeSplinePointIndex = entry.splinePoints.length - 1; // el punto recien agregado queda "activo" para el toggle de Punto duro
   regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
+  syncSplineSharpCheckbox();
   pushHistory();
 }
 
@@ -3665,7 +3835,7 @@ if (tubeApplyBtn) tubeApplyBtn.addEventListener('click', () => {
 // y la extrusion avanza sobre el eje detectado. Mismo truco de
 // "no importa la vista" que ya usa latheProfileFromPoints.
 // =====================================================================
-function extrudeProfileFromPoints(points) {
+function extrudeProfileFromPoints(points, sharp) {
   const xs = points.map(p => p.x), ys = points.map(p => p.y), zs = points.map(p => p.z);
   const rangeX = Math.max(...xs) - Math.min(...xs);
   const rangeY = Math.max(...ys) - Math.min(...ys);
@@ -3684,12 +3854,16 @@ function extrudeProfileFromPoints(points) {
     shape2D = points.map(p => new THREE.Vector2(p.x, p.y)); // vista Frente
   }
 
-  // Suaviza el contorno CERRADO (mismo estilo Catmull-Rom que ya usa el
-  // resto del Spline) antes de armar la forma, para que no salga poligonal.
-  const vec3ForCurve = shape2D.map(v => new THREE.Vector3(v.x, v.y, 0));
-  const closedCurve = new THREE.CatmullRomCurve3(vec3ForCurve, true);
-  const smoothCount = Math.max(24, shape2D.length * 8);
-  const points2D = closedCurve.getSpacedPoints(smoothCount).map(v => new THREE.Vector2(v.x, v.y));
+  // Recorre el contorno CERRADO con sampleCurveWithCorners: liso
+  // (Catmull-Rom) salvo en los puntos marcados "esquina dura" via 'sharp',
+  // que salen rectos -- antes SIEMPRE se suavizaba entero con Catmull-Rom,
+  // por eso un perfil rectangular (para hacer, p.ej., un cubo) salia con
+  // las esquinas redondeadas sin remedio (reportado: "si creo un cubo me
+  // sale redondo").
+  const vec3ForShape = shape2D.map(v => new THREE.Vector3(v.x, v.y, 0));
+  const smoothCount = Math.max(3, Math.ceil(Math.max(24, shape2D.length * 8) / shape2D.length));
+  const sampled = sampleCurveWithCorners(vec3ForShape, true, sharp, smoothCount);
+  const points2D = sampled.map(v => new THREE.Vector2(v.x, v.y));
   return { axis, flatValue, points2D };
 }
 
@@ -3701,7 +3875,8 @@ function applyExtrude(entry, depth, bevelEnabled, bevelSize) {
   const d = depth != null ? depth : (entry.extrudeDepth != null ? entry.extrudeDepth : EXTRUDE_DEFAULT_DEPTH);
   const bevel = bevelEnabled != null ? bevelEnabled : (entry.extrudeBevel != null ? entry.extrudeBevel : false);
   const bsize = bevelSize != null ? bevelSize : (entry.extrudeBevelSize != null ? entry.extrudeBevelSize : EXTRUDE_DEFAULT_BEVEL_SIZE);
-  const profile = extrudeProfileFromPoints(entry.splinePoints);
+  ensureSplineSharpArray(entry);
+  const profile = extrudeProfileFromPoints(entry.splinePoints, entry.splineSharp);
 
   const shape = new THREE.Shape();
   profile.points2D.forEach((p, i) => { if (i === 0) shape.moveTo(p.x, p.y); else shape.lineTo(p.x, p.y); });
@@ -4059,6 +4234,7 @@ function setMode(mode) {
     // que Esculpir/Pelo no dejan un pincel "a medio pasar" prendido.
     clearSplinePreview();
     splinePoints = [];
+    splineDraftSharp = [];
     stopSplinePointEdit();
   }
   toolMode = mode;
@@ -4157,6 +4333,29 @@ function useCamera(cam) {
   orbit._quat.setFromUnitVectors(cam.up, new THREE.Vector3(0, 1, 0));
   orbit._quatInverse.copy(orbit._quat).invert();
   orbit.target.copy(VIEW_TARGET);
+  // Con "enableDamping" prendido (para que orbitar se sienta suave),
+  // OrbitControls NUNCA descarta de golpe el giro/paneo/zoom que quedo "en
+  // el aire" al soltar el dedo (_sphericalDelta/_panOffset/_scale) -- los
+  // va apagando de a poco, multiplicandolos por (1-dampingFactor) en CADA
+  // cuadro de animate(), durante varios cuadros mas despues de soltar. Si
+  // se cambia de camara ANTES de que ese resto termine de apagarse (por
+  // ejemplo: orbitar la vista 3D, soltar, y enseguida tocar el cuadrante
+  // Izquierda para trabajar ahi -- un gesto de lo mas normal), la porcion
+  // de giro/paneo que todavia quedaba pendiente de la camara VIEJA se le
+  // aplica de golpe a la camara NUEVA en el proximo cuadro -- y como las
+  // camaras fijas (Frente/Izquierda/Arriba/etc.) nunca se vuelven a
+  // reposicionar solas, quedan desalineadas PARA SIEMPRE con ese empujon,
+  // aunque nunca se las haya tocado a proposito (bug reportado: "el
+  // izquierdo aun se mueve"). Ya se habia arreglado un caso parecido de
+  // esto mismo (un segundo dedo simultaneo cambiando de cuadrante a mitad
+  // de gesto, ver mas abajo) pero ese arreglo no cubria ESTE camino, mucho
+  // mas comun, de un giro ya TERMINADO (dedo levantado) cuyo resto por
+  // amortiguar todavia no llego a cero. Se descarta ese resto de una vez
+  // (en vez de dejar que seguir decayendo solo) cada vez que se cambia de
+  // camara, para que un cambio de vista/cuadrante siempre arranque "limpio".
+  orbit._sphericalDelta.set(0, 0, 0);
+  orbit._panOffset.set(0, 0, 0);
+  orbit._scale = 1;
   orbit.update();
   transform.camera = cam;
 
