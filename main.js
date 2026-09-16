@@ -4182,14 +4182,44 @@ wrap.addEventListener('dblclick', (e) => {
 // altura (y) como la altura del perfil -- se ordenan de abajo hacia
 // arriba, que es como three.js espera el perfil de un LatheGeometry.
 // =====================================================================
+// Reporte de Andres con una captura de Cinema4D: un perfil en zigzag (sube
+// y baja MAS de una vez, como una corona/engranaje visto de costado) salia
+// como anillos chatos apilados uno arriba del otro, no como una superficie
+// continua zigzagueante -- muy distinto de lo que hace Cinema4D con el
+// mismo perfil.
+//
+// Causa: esta funcion ORDENABA los puntos por altura (`sort by y`) antes
+// de armar el perfil -- eso da por sentado que la Curva siempre se dibuja
+// de abajo hacia arriba (o de arriba hacia abajo) SIN volver nunca para
+// atras, que es el caso mas comun (el pie y el cuello de un florero, por
+// ejemplo) pero no el unico: un perfil real de Revolucion es un CAMINO
+// (como en Cinema4D), no una funcion de altura, y puede zigzaguear subiendo
+// y bajando cuantas veces haga falta (una corona, un tornillo, un perfil
+// con varias muescas). Reordenar por altura destruye ese camino: dos
+// puntos que deberian conectarse consecutivos (por ejemplo, "baja y
+// despues sube") pueden terminar lejos uno del otro en el arreglo
+// reordenado, y lo que se arma en cambio son anillos chatos aislados en
+// cada altura -- exactamente el "queda apilado en capas" de la captura.
+// `THREE.LatheGeometry` en si NO pide que los puntos vengan ordenados por
+// altura -- solo conecta el arreglo en el ORDEN que se le da, sea cual sea
+// (ver su propia documentacion: solo pide radio > 0), asi que alcanza con
+// dejar de ordenar y usar el camino tal cual se dibujo.
 function latheProfileFromPoints(points) {
-  const profile = points
-    .map(p => new THREE.Vector2(Math.max(0.01, Math.hypot(p.x, p.z)), p.y))
-    .sort((a, b) => a.y - b.y);
-  // Evitar segmentos de altura identica (LatheGeometry no soporta un radio
-  // "saltando" en el mismo Y) -- se separan por una fraccion de mm.
+  const profile = points.map(p => new THREE.Vector2(Math.max(0.01, Math.hypot(p.x, p.z)), p.y));
+  // Lo unico que sigue haciendo falta separar es un tramo que cae EXACTO a
+  // la misma altura que el punto anterior (un escalon recto de verdad,
+  // como en la arandela con hendidura) -- ahi si, LatheGeometry no arma
+  // bien un radio "saltando" sin ningun cambio de altura entre dos puntos
+  // consecutivos. Se separa por una fraccion de mm en la misma direccion
+  // en la que ya venia yendo el perfil (hacia arriba si el anterior tambien
+  // subia o es el primer punto, hacia abajo si el anterior bajaba), para
+  // no forzar el perfil entero a subir de mas cuando en realidad venia
+  // bajando (el bug de la version anterior de esta funcion).
   for (let i = 1; i < profile.length; i++) {
-    if (profile[i].y <= profile[i - 1].y) profile[i].y = profile[i - 1].y + 0.01;
+    if (profile[i].y === profile[i - 1].y) {
+      const goingDown = i >= 2 && profile[i - 1].y < profile[i - 2].y;
+      profile[i].y += goingDown ? -0.01 : 0.01;
+    }
   }
   return profile;
 }
