@@ -3441,18 +3441,42 @@ function regenerateEntryFromPoints(entry) {
 }
 
 let splineDragging = false;
-function startSplinePointDrag(mesh) {
+// Plano de arrastre fijado al empezar a tocar un punto -- ver comentario
+// dentro de startSplinePointDrag.
+let splineDragPlane = null;
+function startSplinePointDrag(mesh, cam) {
   draggingSplinePointIndex = mesh.userData.pointIndex;
   splineDragging = true;
   orbit.enabled = false;
+  // Se fija un plano que pasa por la posicion ACTUAL del punto, de frente
+  // a la camara activa en este instante -- en una vista ortografica
+  // (Izquierda/Frente/Arriba) ese plano coincide EXACTO con el plano de
+  // esa vista, asi arrastrar el punto solo lo mueve "arriba/abajo" o "al
+  // lado" (las 2 direcciones que se ven en pantalla), nunca de golpe
+  // hacia adelante/atras de la pantalla. Antes se reusaba el mismo
+  // raycast que usa Pelo (nextHairPoint), pensado para PEGARSE a
+  // cualquier superficie que el rayo encuentre en el medio -- una vez
+  // que la curva ya es un solido de verdad (Revolucion/Tubo/Extrusion),
+  // su propio bulto quedaba en el medio del rayo y el punto saltaba a
+  // esa superficie en vez de moverse parejo (reportado: "se mueven por
+  // todos lados").
+  const camForPlane = cam || (fourViewMode ? GRID_CAMS[activeQuadrant] : activeCamera);
+  const camDir = new THREE.Vector3();
+  camForPlane.getWorldDirection(camDir);
+  splineDragPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, mesh.position);
 }
 
 function onSplinePointDrag(clientX, clientY) {
-  if (draggingSplinePointIndex < 0 || splineEditingId == null) return;
+  if (draggingSplinePointIndex < 0 || splineEditingId == null || !splineDragPlane) return;
   const entry = sceneObjects.get(splineEditingId);
   if (!entry) return;
-  const worldPoint = nextHairPoint(clientX, clientY); // reusa el mismo raycast que ya usa Pelo (pega en superficies, o en un plano de referencia si no hay nada)
-  const local = entry.mesh.worldToLocal(worldPoint.clone());
+  const { rect, cam } = getPointerRayContext(clientX, clientY);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  const worldPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(splineDragPlane, worldPoint)) return; // camara casi de canto contra el plano -- no deberia pasar en la practica
+  const local = entry.mesh.worldToLocal(worldPoint);
   entry.splinePoints[draggingSplinePointIndex].copy(local);
   regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
@@ -3462,6 +3486,7 @@ function stopSplinePointDrag() {
   if (draggingSplinePointIndex < 0) return;
   draggingSplinePointIndex = -1;
   splineDragging = false;
+  splineDragPlane = null;
   orbit.enabled = true;
   pushHistory();
 }
@@ -3487,7 +3512,7 @@ wrap.addEventListener('pointerdown', (e) => {
   const hits = raycaster.intersectObjects(splinePointMeshes, false);
   if (hits.length > 0) {
     e.stopPropagation();
-    startSplinePointDrag(hits[0].object);
+    startSplinePointDrag(hits[0].object, cam);
     return;
   }
   if (splineEditingId != null) {
@@ -3500,8 +3525,24 @@ wrap.addEventListener('pointerdown', (e) => {
 }, { capture: true });
 
 function addSplinePointAtEndFromScreen(entry, clientX, clientY) {
-  const worldPoint = nextHairPoint(clientX, clientY);
-  const local = entry.mesh.worldToLocal(worldPoint.clone());
+  // Mismo criterio que arrastrar un punto (ver startSplinePointDrag): el
+  // punto nuevo se agrega sobre el plano de cara a la camara actual que
+  // pasa por el ULTIMO punto ya existente, no sobre lo primero que el
+  // rayo encuentre -- asi sigue en el mismo plano "chato" que el resto
+  // del perfil en vez de pegarse a la superficie del propio solido.
+  const { rect, cam } = getPointerRayContext(clientX, clientY);
+  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, cam);
+  entry.mesh.updateMatrixWorld(true);
+  const lastLocal = entry.splinePoints[entry.splinePoints.length - 1];
+  const refWorld = lastLocal ? lastLocal.clone().applyMatrix4(entry.mesh.matrixWorld) : entry.mesh.getWorldPosition(new THREE.Vector3());
+  const camDir = new THREE.Vector3();
+  cam.getWorldDirection(camDir);
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, refWorld);
+  const worldPoint = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, worldPoint)) return;
+  const local = entry.mesh.worldToLocal(worldPoint);
   entry.splinePoints.push(local);
   regenerateEntryFromPoints(entry);
   refreshSplinePointHandles();
