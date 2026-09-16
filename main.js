@@ -594,7 +594,7 @@ function cloneObject(id) {
   scene.add(built.node);
   const newId = objIdCounter++;
   built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, splineSharp: src.splineSharp ? src.splineSharp.slice() : undefined, closed: !!src.closed, latheSegments: src.latheSegments, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
+  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, splineSharp: src.splineSharp ? src.splineSharp.slice() : undefined, closed: !!src.closed, latheSegments: src.latheSegments, latheCaps: src.latheCaps !== false, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -1047,6 +1047,8 @@ function selectObject(id) {
         const segs = entry.latheSegments || 32;
         if (latheSegmentsInput) latheSegmentsInput.value = segs;
         if (latheSegmentsVal) latheSegmentsVal.textContent = segs;
+        const latheCapsCheckEl = document.getElementById('latheCapsCheck');
+        if (latheCapsCheckEl) latheCapsCheckEl.checked = (entry.latheCaps !== false); // por defecto prendido (igual que Cinema4D)
       }
     }
 
@@ -2321,6 +2323,23 @@ if (latheSegmentsInput) {
   latheSegmentsInput.addEventListener('change', () => pushHistory());
 }
 
+// "🔘 Tapas" -- ver applyLathe/buildLatheCapGeometry: si el perfil de la
+// curva no toca el eje de Revolucion (radio > 0) en la punta de abajo o de
+// arriba, esa punta queda como un circulo ABIERTO (un aro hueco por dentro,
+// no un solido) salvo que se cierre con un disco chato -- igual que las
+// tapas de Inicio/Fin de un Lathe NURBS en Cinema4D (activadas por defecto
+// ahi tambien). Reportado por Andres comparando con una captura de
+// Cinema4D del mismo proyecto.
+const latheCapsCheck = document.getElementById('latheCapsCheck');
+if (latheCapsCheck) latheCapsCheck.addEventListener('change', () => {
+  if (selectedId == null) return;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || entry.kind !== 'lathe') return;
+  entry.latheCaps = latheCapsCheck.checked;
+  applyLathe(entry, entry.latheSegments);
+  pushHistory();
+});
+
 const tubeRootRadiusInput = document.getElementById('tubeRootRadiusInput');
 const tubeRootRadiusVal = document.getElementById('tubeRootRadiusVal');
 const tubeTipRadiusInput = document.getElementById('tubeTipRadiusInput');
@@ -2719,6 +2738,7 @@ function snapshotScene() {
         s.splineSharp = e.splineSharp ? e.splineSharp.slice() : e.splinePoints.map(() => false);
         s.closed = !!e.closed;
         s.latheSegments = e.latheSegments != null ? e.latheSegments : null;
+        s.latheCaps = e.latheCaps !== false;
         s.tubeRootRadius = e.tubeRootRadius != null ? e.tubeRootRadius : null;
         s.tubeTipRadius = e.tubeTipRadius != null ? e.tubeTipRadius : null;
         s.tubeRadialSegments = e.tubeRadialSegments != null ? e.tubeRadialSegments : null;
@@ -2793,6 +2813,7 @@ function rebuildSceneFrom(snap) {
       splineSharp: s.splineSharp ? s.splineSharp.slice() : undefined,
       closed: !!s.closed,
       latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
+      latheCaps: s.latheCaps !== false,
       tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
       tubeTipRadius: s.tubeTipRadius != null ? s.tubeTipRadius : undefined,
       tubeRadialSegments: s.tubeRadialSegments != null ? s.tubeRadialSegments : undefined,
@@ -3891,6 +3912,69 @@ function latheProfileFromPoints(points) {
   return profile;
 }
 
+// Junta varias BufferGeometry INDEXADAS en una sola (posiciones, normales,
+// UV e indices, todo desplazado correctamente) -- version chica hecha a
+// mano en vez de importar el modulo entero de BufferGeometryUtils, ya que
+// solo hace falta para este caso puntual (pegarle las tapas al Lathe).
+function mergeIndexedGeometries(geometries) {
+  const positions = [], normals = [], uvs = [], indices = [];
+  let vertexOffset = 0;
+  for (const g of geometries) {
+    const posAttr = g.getAttribute('position');
+    const normAttr = g.getAttribute('normal');
+    const uvAttr = g.getAttribute('uv');
+    for (let i = 0; i < posAttr.count; i++) {
+      positions.push(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i));
+      if (normAttr) normals.push(normAttr.getX(i), normAttr.getY(i), normAttr.getZ(i));
+      if (uvAttr) uvs.push(uvAttr.getX(i), uvAttr.getY(i));
+    }
+    const idx = g.getIndex();
+    if (idx) {
+      for (let i = 0; i < idx.count; i++) indices.push(idx.getX(i) + vertexOffset);
+    } else {
+      for (let i = 0; i < posAttr.count; i++) indices.push(i + vertexOffset);
+    }
+    vertexOffset += posAttr.count;
+  }
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (normals.length === positions.length) merged.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  if (uvs.length === (positions.length / 3) * 2) merged.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  merged.setIndex(indices);
+  return merged;
+}
+
+// Disco chato que tapa una punta del Lathe (arriba o abajo) -- un abanico
+// de triangulos desde el centro (0, y, 0) hasta el circulo de radio "radius"
+// a esa altura, con la misma cantidad de divisiones ("segs") que el
+// costado para que se vea prolijo. "facingUp" decide para que lado mira
+// (arriba=+Y, abajo=-Y) -- afecta tanto la normal como el orden de los
+// vertices de cada triangulo (si el orden no coincide con la normal, esa
+// cara queda invisible de ese lado con material.side=FrontSide).
+function buildLatheCapGeometry(radius, y, segs, facingUp) {
+  const positions = [0, y, 0];
+  const normals = [0, facingUp ? 1 : -1, 0];
+  const uvs = [0.5, 0.5];
+  for (let i = 0; i <= segs; i++) {
+    const theta = (i / segs) * Math.PI * 2;
+    const x = Math.cos(theta) * radius, z = Math.sin(theta) * radius;
+    positions.push(x, y, z);
+    normals.push(0, facingUp ? 1 : -1, 0);
+    uvs.push(0.5 + Math.cos(theta) * 0.5, 0.5 + Math.sin(theta) * 0.5);
+  }
+  const indices = [];
+  for (let i = 1; i <= segs; i++) {
+    const center = 0, a = i, b = i + 1;
+    if (facingUp) indices.push(center, b, a); else indices.push(center, a, b);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  return geo;
+}
+
 function applyLathe(entry, segments) {
   // Acepta tanto una curva sin convertir todavia ('spline', la primera vez
   // que se aplica el generador) como una ya convertida ('lathe', cuando
@@ -3900,8 +3984,25 @@ function applyLathe(entry, segments) {
   ensureSolidMeshForGenerator(entry);
   const segs = segments != null ? segments : (entry.latheSegments || 32);
   const profile = latheProfileFromPoints(entry.splinePoints);
-  const geo = new THREE.LatheGeometry(profile, segs);
-  geo.computeVertexNormals();
+  const sideGeo = new THREE.LatheGeometry(profile, segs);
+  sideGeo.computeVertexNormals();
+  // "Tapas" (prendido por defecto, igual que Cinema4D): si el perfil no
+  // toca el eje de Revolucion (radio > 0) en la punta de abajo y/o de
+  // arriba, esa punta queda como un circulo ABIERTO -- un aro hueco por
+  // dentro en vez de un solido de verdad. Reportado por Andres comparando
+  // con una captura de Cinema4D del mismo proyecto ("segun mis calculos
+  // como esta el spline no deberia crearse como una tapa? si es 360?").
+  // Si el radio en esa punta ya es ~0 (el perfil vuelve solo al eje, como
+  // el pie de una copa), no hace falta tapa -- ya cierra solo, sin agujero.
+  const LATHE_CAP_EPS = 0.05;
+  const capsOn = (entry.latheCaps !== false);
+  const parts = [sideGeo];
+  if (capsOn) {
+    const bottom = profile[0], top = profile[profile.length - 1];
+    if (bottom.x > LATHE_CAP_EPS) parts.push(buildLatheCapGeometry(bottom.x, bottom.y, segs, false));
+    if (top.x > LATHE_CAP_EPS) parts.push(buildLatheCapGeometry(top.x, top.y, segs, true));
+  }
+  const geo = parts.length > 1 ? mergeIndexedGeometries(parts) : sideGeo;
   entry.mesh.geometry.dispose();
   entry.mesh.geometry = geo;
   entry.mesh.material.side = THREE.FrontSide;
