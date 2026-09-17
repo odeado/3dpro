@@ -2932,7 +2932,7 @@ function syncClonerChildrenLive(clonerEntry) {
       c.mesh.material.roughness = srcMat.roughness;
       c.mesh.material.metalness = srcMat.metalness;
       c.mesh.material.opacity = srcMat.opacity;
-      c.mesh.material.transparent = srcMat.opacity < 1.0;
+      c.mesh.material.transparent = !!srcMat.map || srcMat.opacity < 1.0;
       c.mesh.material.wireframe = srcMat.wireframe;
     }
   });
@@ -6131,7 +6131,7 @@ function animate() {
     );
     if (srcEntry.mesh.material && entry.mesh.material) {
       entry.mesh.material.opacity = srcEntry.mesh.material.opacity;
-      entry.mesh.material.transparent = srcEntry.mesh.material.opacity < 1.0;
+      entry.mesh.material.transparent = !!srcEntry.mesh.material.map || srcEntry.mesh.material.opacity < 1.0;
       entry.mesh.material.side = THREE.DoubleSide;
       entry.mesh.material.color.copy(srcEntry.mesh.material.color);
       entry.mesh.material.roughness = srcEntry.mesh.material.roughness;
@@ -6663,4 +6663,3 @@ function exportSceneAsOBJ() {
   a.href = url; a.download = '3DPro_escena.obj';
   a.click(); URL.revokeObjectURL(url);
 }
-
