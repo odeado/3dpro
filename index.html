@@ -506,6 +506,9 @@
           <button class="abtn" data-add="light-point">💡 Luz Puntual</button>
           <button class="abtn" data-add="light-spot">🔦 Luz Foco</button>
           <div class="dropdown-divider"></div>
+          <button class="abtn" data-add="decal">🏷️ Calcomanía (imagen PNG)</button>
+          <input id="decalFileInput" type="file" accept=".png,image/png" style="display:none;">
+          <div class="dropdown-divider"></div>
           <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
         </div>
       </div>
@@ -837,6 +840,18 @@
             <div class="prop-row-inline">
               <label>Wireframe</label>
               <input id="propsWireframe" type="checkbox">
+            </div>
+            <div class="prop-row">
+              <label class="context-btn" style="justify-content:center; cursor:pointer;">
+                🖼️ Cargar Textura (PNG)...
+                <input id="materialTextureInput" type="file" accept=".png,image/png" style="display:none;">
+              </label>
+            </div>
+            <div id="materialTextureInfoRow" style="display:none;">
+              <div class="prop-row">
+                <label style="font-size:12px; color:#9aa0a8;">Textura cargada — el Color Base de arriba queda como tinte.</label>
+              </div>
+              <button id="materialTextureClearBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Quitar Textura</button>
             </div>
           </div>
         </div>

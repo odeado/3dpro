@@ -176,7 +176,7 @@ const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
   cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)',
   hair: '💇 Pelo', spline: '🧵 Curva', lathe: '🥂 Revolución', tube: '🧴 Tubo', extrude: '📐 Extrusión', text: '🔤 Texto 3D',
-  'light-point': '💡 Luz Puntual', 'light-spot': '🔦 Luz Foco'
+  'light-point': '💡 Luz Puntual', 'light-spot': '🔦 Luz Foco', decal: '🏷️ Calcomanía'
 };
 
 // Una luz (Puntual/Foco) no tiene superficie ni volumen -- igual que un
@@ -189,6 +189,23 @@ const KIND_LABEL = {
 function isLightKind(kind) {
   return kind === 'light-point' || kind === 'light-spot';
 }
+
+// El slider de "Intensidad" en Atributos usa numeros comodos y familiares
+// (por defecto 60/80, hasta 300) pensados como si esta luz no se apagara
+// con la distancia -- pero THREE.PointLight/THREE.SpotLight en esta
+// version de three.js SIEMPRE usan unidades fotometricas reales (candela),
+// que se dividen por la distancia AL CUADRADO (ley de la inversa del
+// cuadrado). Como toda esta app trabaja en milimetros con figuras de
+// decenas/cientos de mm, esa division deja practicamente CERO luz visible
+// con numeros como 60-300 (Andres las probo en su celular: subio todos los
+// sliders al maximo y no vio ningun cambio -- se confirmo con una prueba
+// midiendo el color renderizado real, no solo el valor guardado). Esta
+// constante convierte el numero "comodo" del slider a las unidades reales
+// que necesita el motor 3D, sin tener que exponerle a Andres numeros como
+// "12000" en la interfaz. Calibrado a ojo (ver /tmp en el historial de
+// pruebas) para que el valor por defecto ya se note claramente a una
+// distancia tipica (unas pocas decenas de mm) sin quemar la imagen a blanco.
+const LIGHT_INTENSITY_SCALE = 50;
 
 // 'spline' (curva editable, sin generador aplicado todavia) y 'lathe' (ya
 // convertida en un solido de revolucion) comparten con 'hair' el mismo
@@ -426,6 +443,10 @@ function geometryFor(kind) {
     case 'cone': return new THREE.ConeGeometry(42, 78, 32, 16);
     case 'plane': return new THREE.PlaneGeometry(90, 90, 24, 24);
     case 'torus': return new THREE.TorusGeometry(42, 15, 24, 64);
+    // Un plano simple (sin subdivisiones -- no hace falta esculpirlo) que
+    // nace precargado con una imagen PNG (ver addDecalWithFile): sirve para
+    // "pegar" un logo u otra imagen con fondo transparente sobre la escena.
+    case 'decal': return new THREE.PlaneGeometry(100, 100, 1, 1);
     case 'cube':
     default: return new THREE.BoxGeometry(66, 66, 66, 12, 12, 12);
   }
@@ -481,13 +502,13 @@ function buildObject(kind, colorHex, extra) {
     if (kind === 'light-point') {
       const distance = (extra && extra.lightDistance != null) ? extra.lightDistance : 0;
       const decay = (extra && extra.lightDecay != null) ? extra.lightDecay : 2;
-      light = new THREE.PointLight(lc, intensity, distance, decay);
+      light = new THREE.PointLight(lc, intensity * LIGHT_INTENSITY_SCALE, distance, decay);
     } else {
       const distance = (extra && extra.lightDistance != null) ? extra.lightDistance : 0;
       const decay = (extra && extra.lightDecay != null) ? extra.lightDecay : 2;
       const angleDeg = (extra && extra.lightAngle != null) ? extra.lightAngle : 35;
       const penumbra = (extra && extra.lightPenumbra != null) ? extra.lightPenumbra : 0.3;
-      light = new THREE.SpotLight(lc, intensity, distance, THREE.MathUtils.degToRad(angleDeg), penumbra, decay);
+      light = new THREE.SpotLight(lc, intensity * LIGHT_INTENSITY_SCALE, distance, THREE.MathUtils.degToRad(angleDeg), penumbra, decay);
       // El objetivo (hacia dónde apunta) es un hijo del propio grupo, a una
       // distancia fija "hacia abajo" en su espacio LOCAL -- así, rotar el
       // grupo con el gizmo de Rotar apunta la luz, sin necesitar un target
@@ -546,7 +567,10 @@ function buildObject(kind, colorHex, extra) {
     roughness, metalness, opacity,
     transparent: opacity < 1,
     wireframe,
-    side: kind === 'plane' ? THREE.DoubleSide : THREE.FrontSide
+    // Una Calcomania es, para efectos de material, igual a un Plano -- se
+    // ve por ambos lados (de otro modo desaparecería si se la mira desde
+    // "atrás" al rotarla).
+    side: (kind === 'plane' || kind === 'decal') ? THREE.DoubleSide : THREE.FrontSide
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.castShadow = true;
@@ -585,6 +609,11 @@ function addPrimitive(kind) {
 // la entry -- igual patron que clonerCount/symAxis en otros modificadores --
 // para poder seguir editandolos en vivo desde Atributos despues de creada.
 function addLight(kind) {
+  // Antes de agregar la luz nueva -- que ya deja seleccionada a ELLA misma
+  // al final de esta funcion (ver selectObject(id) mas abajo) -- se guarda
+  // que habia seleccionado antes, si habia algo: es el candidato mas
+  // probable a ser lo que Andres quiere iluminar.
+  const previousSelection = selectedId != null ? sceneObjects.get(selectedId) : null;
   const defaults = kind === 'light-point'
     ? { lightColor: 0xffe9b3, lightIntensity: 60, lightDistance: 0, lightDecay: 2, lightCastShadow: false }
     : { lightColor: 0xffe9b3, lightIntensity: 80, lightDistance: 0, lightDecay: 2, lightAngle: 35, lightPenumbra: 0.3, lightCastShadow: false };
@@ -592,7 +621,33 @@ function addLight(kind) {
   const pos = nextPlacement();
   pos.y = 120; // arranca en alto, como cualquier lampara -- a ras del piso queda raro/confuso
   built.node.position.set(pos.x, pos.y, pos.z);
-  if (kind === 'light-spot') built.node.rotation.x = -Math.PI / 2.2; // apunta medio hacia abajo/adelante, no derecho para abajo
+  if (kind === 'light-spot') {
+    // Una Luz Foco que no apunta a nada es indistinguible de una que no
+    // funciona -- antes SIEMPRE arrancaba con la misma rotacion fija
+    // (medio hacia abajo/adelante en Z+), que solo por casualidad apuntaba
+    // cerca de una figura. Ahora, si habia algo seleccionado antes de
+    // agregar la luz, apunta directo hacia ese objeto (el caso normal:
+    // seleccionaste la figura que queres iluminar y despues agregaste la
+    // luz); si no habia nada seleccionado, mantiene el mismo comportamiento
+    // de siempre (hacia abajo/adelante) como punto de partida razonable.
+    if (previousSelection && previousSelection.mesh) {
+      previousSelection.mesh.updateMatrixWorld(true);
+      const aimPoint = new THREE.Vector3();
+      previousSelection.mesh.getWorldPosition(aimPoint);
+      const dir = aimPoint.sub(built.node.position).normalize();
+      if (dir.lengthSq() > 0.0001) {
+        // El "adelante" de esta Luz Foco es su eje LOCAL -Y (ver el hijo
+        // "target" en buildObject, a (0,-100,0)) -- no el -Z de siempre en
+        // three.js -- por eso no se puede usar Object3D.lookAt() directo,
+        // hace falta el quaternion que lleva (0,-1,0) hasta la direccion real.
+        built.node.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), dir);
+      } else {
+        built.node.rotation.x = -Math.PI / 2.2;
+      }
+    } else {
+      built.node.rotation.x = -Math.PI / 2.2; // apunta medio hacia abajo/adelante, no derecho para abajo
+    }
+  }
   scene.add(built.node);
   const id = objIdCounter++;
   built.pickMesh.userData.ownerId = id;
@@ -624,6 +679,129 @@ async function addTextPrimitive() {
   sceneObjects.set(id, {
     id, kind: 'text', mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false,
     text: TEXT_DEFAULT_TEXT, fontKey: TEXT_DEFAULT_FONT, textSize: TEXT_DEFAULT_SIZE, textDepth: TEXT_DEFAULT_DEPTH, textBevel: false, textBevelSize: TEXT_DEFAULT_BEVEL_SIZE
+  });
+  renderLayerList();
+  selectObject(id);
+  pushHistory();
+}
+
+// --- Texturas de imagen (PNG con canal alpha) ---
+// Compartido por dos casos de uso: (a) aplicar una imagen como textura del
+// material de CUALQUIER figura ya existente, desde Atributos > Material
+// (reemplaza el color solido por la imagen, respetando su transparencia --
+// ver applyTextureToMaterial), y (b) crear una Calcomania nueva (un Plano
+// pre-cargado con la imagen, para "pegar" un logo suelto en la escena, ver
+// addDecalWithFile mas abajo). A diferencia del HDRI (que queda solo en
+// memoria de la sesion, ver mas abajo, "Entorno / HDRI"), esta imagen SI se
+// guarda embebida en el diseño -- por eso se reduce antes a un maximo de
+// 1024px de lado: una foto de varios MB entera desbordaria el localStorage
+// que usa "Guardar diseño" (ver saveProjectsMap).
+const TEXTURE_MAX_DIM = 1024;
+const textureImageCache = {}; // dataURL -> THREE.Texture ya decodificada, para no recrearla si se repite (p.ej. Deshacer/Rehacer)
+const textureLoader = new THREE.TextureLoader();
+
+function downscaleImageToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let width = img.naturalWidth, height = img.naturalHeight;
+      const scale = Math.min(1, TEXTURE_MAX_DIM / Math.max(width, height));
+      width = Math.max(1, Math.round(width * scale));
+      height = Math.max(1, Math.round(height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      resolve({ dataUrl: canvas.toDataURL('image/png'), width, height });
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo leer la imagen')); };
+    img.src = url;
+  });
+}
+
+function loadTextureFromDataUrl(dataUrl) {
+  if (textureImageCache[dataUrl]) return Promise.resolve(textureImageCache[dataUrl]);
+  return new Promise((resolve, reject) => {
+    textureLoader.load(dataUrl, (tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      textureImageCache[dataUrl] = tex;
+      resolve(tex);
+    }, undefined, reject);
+  });
+}
+
+// Combina reducir + decodificar -- devuelve todo lo que hace falta tanto
+// para guardar (dataUrl, para snapshotEntry) como para mostrar (texture,
+// width/height para ajustar la proporcion del plano en una Calcomania).
+async function loadTextureFromFile(file) {
+  const { dataUrl, width, height } = await downscaleImageToDataUrl(file);
+  const texture = await loadTextureFromDataUrl(dataUrl);
+  return { dataUrl, width, height, texture };
+}
+
+// Deja el color base en blanco (sin tinte) para que la imagen se vea con
+// sus colores reales apenas se carga -- el control de Color Base en
+// Atributos sigue funcionando despues como un tinte opcional (three.js
+// multiplica color * textura). "transparent = true" siempre que haya
+// textura, SIN IMPORTAR el valor del slider de Opacidad -- ver el listener
+// de propsOpacity mas abajo, que respeta este mismo criterio.
+function applyTextureToMaterial(mat, texture) {
+  mat.map = texture;
+  mat.color.set(0xffffff);
+  mat.transparent = true;
+  mat.needsUpdate = true;
+}
+
+async function applyTextureToEntry(entry, file) {
+  const { dataUrl, width, height, texture } = await loadTextureFromFile(file);
+  entry.textureDataUrl = dataUrl;
+  entry.textureAspect = width / height;
+  if (entry.mesh.material) applyTextureToMaterial(entry.mesh.material, texture);
+  return { width, height };
+}
+
+function clearEntryTexture(entry) {
+  entry.textureDataUrl = null;
+  entry.textureAspect = null;
+  const mat = entry.mesh.material;
+  if (mat) {
+    mat.map = null;
+    mat.transparent = mat.opacity < 1.0;
+    mat.needsUpdate = true;
+  }
+}
+
+// La Calcomania pide el PNG de una (ver el manejador de decalFileInput) y
+// recien arma la figura cuando la imagen ya esta lista -- mismo patron que
+// addTextPrimitive (esperar antes de crear, no crear vacio y rellenar
+// despues), asi el Deshacer inicial ya la encuentra completa.
+async function addDecalWithFile(file) {
+  let loaded;
+  try {
+    loaded = await loadTextureFromFile(file);
+  } catch (err) {
+    console.error('No se pudo cargar la imagen de la calcomania:', err);
+    alert('No se pudo cargar esa imagen. ¿Es un PNG válido?');
+    return;
+  }
+  const built = buildObject('decal');
+  applyTextureToMaterial(built.node.material, loaded.texture);
+  // El Plano base nace cuadrado (ver geometryFor) -- si la imagen es
+  // rectangular, se ajusta UN SOLO eje de escala para no deformarla (mismo
+  // mecanismo de "Tamaño" que ya usa cualquier otra figura de este editor).
+  const aspect = loaded.width / loaded.height;
+  if (aspect >= 1) built.node.scale.y = 1 / aspect;
+  else built.node.scale.x = aspect;
+  const pos = nextPlacement();
+  built.node.position.set(pos.x, pos.y, pos.z);
+  scene.add(built.node);
+  const id = objIdCounter++;
+  built.pickMesh.userData.ownerId = id;
+  sceneObjects.set(id, {
+    id, kind: 'decal', mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null,
+    sculpted: false, name: null, collapsed: false,
+    textureDataUrl: loaded.dataUrl, textureAspect: aspect
   });
   renderLayerList();
   selectObject(id);
@@ -1052,6 +1230,9 @@ const lightAngleVal = document.getElementById('lightAngleVal');
 const lightPenumbraInput = document.getElementById('lightPenumbraInput');
 const lightPenumbraVal = document.getElementById('lightPenumbraVal');
 const lightShadowCheck = document.getElementById('lightShadowCheck');
+const materialTextureInput = document.getElementById('materialTextureInput');
+const materialTextureInfoRow = document.getElementById('materialTextureInfoRow');
+const materialTextureClearBtn = document.getElementById('materialTextureClearBtn');
 
 // Transform inputs
 const posX = document.getElementById('posX');
@@ -1209,6 +1390,7 @@ function selectObject(id) {
       propsMetalness.value = entry.mesh.material.metalness != null ? entry.mesh.material.metalness : 0.05;
       propsOpacity.value = entry.mesh.material.opacity != null ? entry.mesh.material.opacity : 1.0;
       propsWireframe.checked = !!entry.mesh.material.wireframe;
+      if (materialTextureInfoRow) materialTextureInfoRow.style.display = entry.textureDataUrl ? 'block' : 'none';
     } else {
       if (matSection) matSection.style.display = 'none';
     }
@@ -1222,7 +1404,7 @@ function selectObject(id) {
         const light = entry.mesh.userData.light;
         lightPropsTitle.textContent = KIND_LABEL[entry.kind];
         lightColorInput.value = '#' + (new THREE.Color(entry.lightColor != null ? entry.lightColor : 0xffe9b3)).getHexString();
-        lightIntensityInput.value = entry.lightIntensity != null ? entry.lightIntensity : (light ? light.intensity : 60);
+        lightIntensityInput.value = entry.lightIntensity != null ? entry.lightIntensity : (light ? light.intensity / LIGHT_INTENSITY_SCALE : 60);
         lightIntensityVal.textContent = lightIntensityInput.value;
         lightDistanceInput.value = entry.lightDistance != null ? entry.lightDistance : 0;
         lightDistanceVal.textContent = lightDistanceInput.value;
@@ -1511,10 +1693,15 @@ propsOpacity.addEventListener('input', () => {
     const entry = sceneObjects.get(selectedId);
     if (entry && entry.mesh) {
       const val = parseFloat(propsOpacity.value);
+      // Si hay una textura cargada, "transparent" queda SIEMPRE prendido
+      // (el canal alpha del PNG puede necesitarlo aunque la Opacidad este
+      // en 1.0) -- de lo contrario, subir la Opacidad de vuelta a 1.0
+      // apagaria "transparent" y el fondo del PNG dejaria de recortarse.
+      const hasTexture = !!entry.textureDataUrl;
       entry.mesh.traverse(child => {
         if (child.material) {
           child.material.opacity = val;
-          child.material.transparent = val < 1.0;
+          child.material.transparent = hasTexture || val < 1.0;
           child.material.depthWrite = true;
           child.material.needsUpdate = true;
         }
@@ -1533,6 +1720,36 @@ propsWireframe.addEventListener('change', () => {
     }
   }
 });
+
+// --- Textura de imagen (PNG) sobre el material de la figura seleccionada ---
+if (materialTextureInput) {
+  materialTextureInput.addEventListener('change', async () => {
+    const file = materialTextureInput.files && materialTextureInput.files[0];
+    materialTextureInput.value = ''; // permite volver a elegir el MISMO archivo despues
+    if (!file || selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || !entry.mesh.material) return;
+    try {
+      await applyTextureToEntry(entry, file);
+      propsColor.value = '#ffffff'; // refleja el "sin tinte" que aplica applyTextureToMaterial
+      if (materialTextureInfoRow) materialTextureInfoRow.style.display = 'block';
+      pushHistory();
+    } catch (err) {
+      console.error('No se pudo cargar la textura:', err);
+      alert('No se pudo cargar esa imagen como textura. ¿Es un PNG válido?');
+    }
+  });
+}
+if (materialTextureClearBtn) {
+  materialTextureClearBtn.addEventListener('click', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry) return;
+    clearEntryTexture(entry);
+    if (materialTextureInfoRow) materialTextureInfoRow.style.display = 'none';
+    pushHistory();
+  });
+}
 
 // --- Propiedades de Luz (Puntual/Foco) en vivo ---
 function getSelectedLight() {
@@ -1556,8 +1773,8 @@ lightIntensityInput.addEventListener('input', () => {
   const sel = getSelectedLight();
   if (!sel) return;
   const val = parseFloat(lightIntensityInput.value);
-  sel.entry.lightIntensity = val;
-  sel.light.intensity = val;
+  sel.entry.lightIntensity = val; // se guarda el numero "comodo" del slider...
+  sel.light.intensity = val * LIGHT_INTENSITY_SCALE; // ...y a la luz real se le pasa ya convertido (ver LIGHT_INTENSITY_SCALE)
   lightIntensityVal.textContent = val;
 });
 lightIntensityInput.addEventListener('change', () => { pushHistory(); });
@@ -3356,6 +3573,8 @@ function snapshotEntry(e) {
       metalness: e.mesh.material ? e.mesh.material.metalness : null,
       opacity: e.mesh.material ? e.mesh.material.opacity : null,
       wireframe: e.mesh.material ? !!e.mesh.material.wireframe : null,
+      textureDataUrl: e.textureDataUrl || null,
+      textureAspect: e.textureAspect || null,
       clonerMode: e.clonerMode || null,
       clonerCount: e.clonerCount != null ? e.clonerCount : null,
       clonerSourceId: e.clonerSourceId != null ? e.clonerSourceId : null,
@@ -3468,10 +3687,24 @@ function buildEntryFromSnapshot(s) {
     sculpted = true;
   }
   built.pickMesh.userData.ownerId = s.id;
+  // La textura se restaura de forma ASINCRONICA (decodificar un dataURL
+  // pasa por un <img>/onload, aunque sea practicamente instantaneo al ser
+  // local) -- por eso no puede ir en "extraOpts" como el resto de las
+  // propiedades del material: buildObject() es sincronico y ya devolvio el
+  // material armado. Igual que sculptPositions arriba, se aplica ENCIMA del
+  // material recien creado; hasta que resuelva, la figura se ve con su
+  // color solido nomas (aparece la imagen un instante despues, imperceptible).
+  if (s.textureDataUrl && built.node.material) {
+    loadTextureFromDataUrl(s.textureDataUrl).then(tex => {
+      applyTextureToMaterial(built.node.material, tex);
+    }).catch(err => console.error('No se pudo restaurar una textura guardada:', err));
+  }
   return {
     id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
     visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
     sculpted, name: s.name || null, collapsed: !!s.collapsed,
+    textureDataUrl: s.textureDataUrl || null,
+    textureAspect: s.textureAspect || null,
     clonerMode: s.clonerMode || null,
     clonerCount: s.clonerCount != null ? s.clonerCount : null,
     clonerSourceId: s.clonerSourceId != null ? s.clonerSourceId : null,
@@ -3981,8 +4214,23 @@ importJsonInput.addEventListener('change', (e) => {
 
 // --- Botones "Agregar" ---
 document.querySelectorAll('.abtn').forEach(btn => {
-  btn.addEventListener('click', () => addPrimitive(btn.dataset.add));
+  btn.addEventListener('click', () => {
+    // La Calcomania no tiene sentido "en blanco" -- pide el archivo PNG de
+    // una vez (mismo criterio que "Cargar HDRI..."), y solo se crea la
+    // figura cuando la imagen ya cargo (ver addDecalWithFile).
+    if (btn.dataset.add === 'decal') { if (decalFileInput) decalFileInput.click(); return; }
+    addPrimitive(btn.dataset.add);
+  });
 });
+
+const decalFileInput = document.getElementById('decalFileInput');
+if (decalFileInput) {
+  decalFileInput.addEventListener('change', () => {
+    const file = decalFileInput.files && decalFileInput.files[0];
+    decalFileInput.value = ''; // permite volver a elegir el MISMO archivo despues
+    if (file) addDecalWithFile(file);
+  });
+}
 
 // --- Selección por toque/click en el canvas ---
 const raycaster = new THREE.Raycaster();
@@ -6415,3 +6663,4 @@ function exportSceneAsOBJ() {
   a.href = url; a.download = '3DPro_escena.obj';
   a.click(); URL.revokeObjectURL(url);
 }
+
