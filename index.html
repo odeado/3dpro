@@ -503,6 +503,9 @@
           <div class="dropdown-divider"></div>
           <button class="abtn" data-add="text">🔤 Texto 3D</button>
           <div class="dropdown-divider"></div>
+          <button class="abtn" data-add="light-point">💡 Luz Puntual</button>
+          <button class="abtn" data-add="light-spot">🔦 Luz Foco</button>
+          <div class="dropdown-divider"></div>
           <button class="abtn" data-add="null">🗂️ Grupo (Nulo)</button>
         </div>
       </div>
@@ -878,6 +881,38 @@
           </div>
         </div>
 
+        <!-- 3c. Luz (Puntual / Foco) -->
+        <div id="lightPropsSection" style="display:none;">
+          <h3 id="lightPropsTitle">💡 Luz</h3>
+          <div class="prop-group">
+            <div class="prop-row">
+              <label>Color</label>
+              <input id="lightColorInput" type="color" value="#ffe9b3">
+            </div>
+            <div class="prop-row">
+              <label>Intensidad: <span id="lightIntensityVal">60</span></label>
+              <input id="lightIntensityInput" type="range" min="0" max="300" step="1" value="60">
+            </div>
+            <div class="prop-row">
+              <label>Alcance (mm, 0 = infinito): <span id="lightDistanceVal">0</span></label>
+              <input id="lightDistanceInput" type="range" min="0" max="1000" step="10" value="0">
+            </div>
+            <div class="prop-row">
+              <label>Decaimiento: <span id="lightDecayVal">2</span></label>
+              <input id="lightDecayInput" type="range" min="0" max="4" step="0.1" value="2">
+            </div>
+            <div class="prop-row" id="lightSpotOnlyRow">
+              <label>Ángulo del cono: <span id="lightAngleVal">35</span>°</label>
+              <input id="lightAngleInput" type="range" min="5" max="90" step="1" value="35">
+              <label style="margin-top:6px; display:block;">Penumbra (borde suave): <span id="lightPenumbraVal">0.3</span></label>
+              <input id="lightPenumbraInput" type="range" min="0" max="1" step="0.05" value="0.3">
+            </div>
+            <div class="prop-row">
+              <label><input id="lightShadowCheck" type="checkbox"> Emite sombra</label>
+            </div>
+          </div>
+        </div>
+
         <!-- 7. Eliminar -->
         <div class="prop-group">
           <button id="deleteObjBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Eliminar objeto (Del)</button>
@@ -897,6 +932,31 @@
           <label>Sombras proyectadas</label>
           <input id="shadowToggle" type="checkbox" checked>
         </div>
+      </div>
+      <div class="prop-group">
+        <h3 style="margin-top:0;">🌅 Entorno (HDRI)</h3>
+        <div class="prop-row">
+          <label style="font-size:12px; color:#9aa0a8;">Ilumina y refleja la escena con una imagen panorámica (archivo .hdr) en vez de solo las luces de arriba — como poner la figura afuera bajo el cielo real de una foto.</label>
+        </div>
+        <div class="prop-row">
+          <label class="context-btn" style="justify-content:center; cursor:pointer;">
+            📁 Cargar HDRI...
+            <input id="hdriFileInput" type="file" accept=".hdr" style="display:none;">
+          </label>
+        </div>
+        <div id="hdriControlsRow" style="display:none;">
+          <div class="prop-row">
+            <label>Intensidad del Entorno: <span id="hdriIntensityVal">1</span></label>
+            <input id="hdriIntensityInput" type="range" min="0" max="3" step="0.05" value="1">
+          </div>
+          <div class="prop-row">
+            <label><input id="hdriBackgroundCheck" type="checkbox"> Usar también como fondo</label>
+          </div>
+          <div class="prop-row">
+            <button id="hdriClearBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Quitar HDRI</button>
+          </div>
+        </div>
+        <div id="hdriLoadingMsg" style="display:none; font-size:12px; color:#9aa0a8;">Cargando HDRI...</div>
       </div>
     </div>
   </aside>

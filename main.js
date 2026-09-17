@@ -9,6 +9,7 @@ import { OrbitControls } from './vendor/three-addons/OrbitControls.js';
 import { TransformControls } from './vendor/three-addons/TransformControls.js';
 import { FontLoader } from './vendor/three-addons/loaders/FontLoader.js';
 import { TextGeometry } from './vendor/three-addons/geometries/TextGeometry.js';
+import { HDRLoader } from './vendor/three-addons/loaders/HDRLoader.js';
 
 const wrap = document.getElementById('canvasWrap');
 const layerList = document.getElementById('layerList');
@@ -110,6 +111,16 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 wrap.appendChild(renderer.domElement);
 
+// Generador de mapas de entorno (HDRI) -- convierte la imagen panoramica
+// cargada por el usuario en algo que three.js puede usar tanto para
+// reflejos/iluminacion basada en imagen (scene.environment) como para fondo
+// (scene.background). Se arma una sola vez, reusando siempre el mismo
+// renderer, y se "precompila" el shader para que la PRIMERA carga de un
+// HDRI no se sienta con un salto (jank) al compilarlo recien en ese momento.
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+let currentEnvRenderTarget = null; // se libera antes de armar el siguiente, para no acumular memoria de video
+
 const BASE_DIR_INTENSITY = 1.1;
 const BASE_AMBIENT_INTENSITY = 0.45;
 const dirLight = new THREE.DirectionalLight(0xffffff, BASE_DIR_INTENSITY);
@@ -164,8 +175,20 @@ let toolMode = 'translate'; // 'translate' | 'rotate' | 'scale' | 'sculpt'
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
   cone: '🔺 Cono', plane: '▭ Plano', torus: '🍩 Toroide', null: '🗂️ Grupo (Nulo)',
-  hair: '💇 Pelo', spline: '🧵 Curva', lathe: '🥂 Revolución', tube: '🧴 Tubo', extrude: '📐 Extrusión', text: '🔤 Texto 3D'
+  hair: '💇 Pelo', spline: '🧵 Curva', lathe: '🥂 Revolución', tube: '🧴 Tubo', extrude: '📐 Extrusión', text: '🔤 Texto 3D',
+  'light-point': '💡 Luz Puntual', 'light-spot': '🔦 Luz Foco'
 };
+
+// Una luz (Puntual/Foco) no tiene superficie ni volumen -- igual que un
+// Nulo, no cuenta para Lista de Piezas/exportar OBJ, no se puede esculpir,
+// y sus tiradores de Escalar no tienen sentido (ya los excluye solo el
+// chequeo de "!entry.mesh.geometry" que ya existe en varios lugares, porque
+// el nodo de una luz es un THREE.Group sin geometria propia -- igual que un
+// Nulo). Centralizado para los lugares que sí necesitan distinguirla a
+// propósito de un Nulo (Lista de Piezas, exportar OBJ).
+function isLightKind(kind) {
+  return kind === 'light-point' || kind === 'light-spot';
+}
 
 // 'spline' (curva editable, sin generador aplicado todavia) y 'lathe' (ya
 // convertida en un solido de revolucion) comparten con 'hair' el mismo
@@ -413,6 +436,19 @@ function geometryFor(kind) {
 // mismo; para un Nulo, "node" es el grupo vacio que se mueve/rota/escala
 // (y que arrastra con el a todo lo que se agrupe adentro), y "pickMesh" es
 // una esfera invisible mas grande, para poder tocarlo comodo con el dedo.
+// Ícono chico (octaedro) que representa a una luz en el visor -- las luces
+// de three.js no tienen ninguna geometría visible propia, así que sin esto
+// serían invisibles/imposibles de encontrar y seleccionar en la escena.
+// Se colorea con el mismo color de la luz para reconocerla de un vistazo.
+function buildLightIconMesh(colorHex) {
+  const icon = new THREE.Mesh(
+    new THREE.OctahedronGeometry(9, 0),
+    new THREE.MeshBasicMaterial({ color: colorHex, wireframe: true, depthTest: false })
+  );
+  icon.renderOrder = 999; // se ve siempre por encima de la figura, como un ícono de UI
+  return icon;
+}
+
 function buildObject(kind, colorHex, extra) {
   if (kind === 'null') {
     const group = new THREE.Object3D();
@@ -423,6 +459,54 @@ function buildObject(kind, colorHex, extra) {
       new THREE.MeshBasicMaterial({ visible: false })
     );
     group.add(hitMesh);
+    return { node: group, pickMesh: hitMesh };
+  }
+
+  if (kind === 'light-point' || kind === 'light-spot') {
+    const lc = (extra && extra.lightColor != null) ? extra.lightColor : 0xffe9b3;
+    const intensity = (extra && extra.lightIntensity != null) ? extra.lightIntensity : (kind === 'light-point' ? 60 : 80);
+    const castShadow = extra && extra.lightCastShadow != null ? !!extra.lightCastShadow : false;
+    const group = new THREE.Object3D();
+    const icon = buildLightIconMesh(lc);
+    group.add(icon);
+    // Esfera invisible más grande que el ícono, para que sea cómodo tocarla
+    // con el dedo/lápiz (mismo criterio que el pickMesh de un Nulo).
+    const hitMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(16, 8, 6),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    group.add(hitMesh);
+
+    let light;
+    if (kind === 'light-point') {
+      const distance = (extra && extra.lightDistance != null) ? extra.lightDistance : 0;
+      const decay = (extra && extra.lightDecay != null) ? extra.lightDecay : 2;
+      light = new THREE.PointLight(lc, intensity, distance, decay);
+    } else {
+      const distance = (extra && extra.lightDistance != null) ? extra.lightDistance : 0;
+      const decay = (extra && extra.lightDecay != null) ? extra.lightDecay : 2;
+      const angleDeg = (extra && extra.lightAngle != null) ? extra.lightAngle : 35;
+      const penumbra = (extra && extra.lightPenumbra != null) ? extra.lightPenumbra : 0.3;
+      light = new THREE.SpotLight(lc, intensity, distance, THREE.MathUtils.degToRad(angleDeg), penumbra, decay);
+      // El objetivo (hacia dónde apunta) es un hijo del propio grupo, a una
+      // distancia fija "hacia abajo" en su espacio LOCAL -- así, rotar el
+      // grupo con el gizmo de Rotar apunta la luz, sin necesitar un target
+      // aparte que el usuario tenga que mover a mano (como en three.js por
+      // defecto, donde el target vive suelto en (0,0,0) si no se lo mueve).
+      const target = new THREE.Object3D();
+      target.position.set(0, -100, 0);
+      group.add(target);
+      light.target = target;
+    }
+    light.castShadow = castShadow;
+    if (castShadow) {
+      light.shadow.mapSize.width = 512;
+      light.shadow.mapSize.height = 512;
+      light.shadow.bias = -0.001;
+    }
+    group.add(light);
+    group.userData.light = light; // acceso directo sin recorrer children
+    group.userData.icon = icon; // para poder recolorear el icono en vivo
     return { node: group, pickMesh: hitMesh };
   }
 
@@ -483,6 +567,7 @@ function nextPlacement() {
 
 function addPrimitive(kind) {
   if (kind === 'text') { addTextPrimitive(); return; }
+  if (kind === 'light-point' || kind === 'light-spot') { addLight(kind); return; }
   const built = buildObject(kind);
   const pos = nextPlacement();
   built.node.position.set(pos.x, pos.y, pos.z);
@@ -490,6 +575,31 @@ function addPrimitive(kind) {
   const id = objIdCounter++;
   built.pickMesh.userData.ownerId = id;
   sceneObjects.set(id, { id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false });
+  renderLayerList();
+  selectObject(id);
+  pushHistory();
+}
+
+// Agregar una luz (Puntual o Foco): a diferencia de una primitiva, guarda
+// ademas sus propios parametros (color/intensidad/alcance/etc.) sueltos en
+// la entry -- igual patron que clonerCount/symAxis en otros modificadores --
+// para poder seguir editandolos en vivo desde Atributos despues de creada.
+function addLight(kind) {
+  const defaults = kind === 'light-point'
+    ? { lightColor: 0xffe9b3, lightIntensity: 60, lightDistance: 0, lightDecay: 2, lightCastShadow: false }
+    : { lightColor: 0xffe9b3, lightIntensity: 80, lightDistance: 0, lightDecay: 2, lightAngle: 35, lightPenumbra: 0.3, lightCastShadow: false };
+  const built = buildObject(kind, undefined, defaults);
+  const pos = nextPlacement();
+  pos.y = 120; // arranca en alto, como cualquier lampara -- a ras del piso queda raro/confuso
+  built.node.position.set(pos.x, pos.y, pos.z);
+  if (kind === 'light-spot') built.node.rotation.x = -Math.PI / 2.2; // apunta medio hacia abajo/adelante, no derecho para abajo
+  scene.add(built.node);
+  const id = objIdCounter++;
+  built.pickMesh.userData.ownerId = id;
+  sceneObjects.set(id, {
+    id, kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null,
+    sculpted: false, name: null, collapsed: false, ...defaults
+  });
   renderLayerList();
   selectObject(id);
   pushHistory();
@@ -731,26 +841,16 @@ function copySculptIfAny(srcEntry, destNode) {
 function cloneObject(id) {
   const src = sceneObjects.get(id);
   if (!src) return;
-  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
-  const extraOpts = {
-    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
-    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
-    opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
-    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
-  };
-  if (isCustomGeomKind(src.kind)) {
-    extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
-  }
-  if (src.kind === 'spline') extraOpts.closed = !!src.closed;
-  const built = buildObject(src.kind, colorHex, extraOpts);
-  built.node.position.copy(src.mesh.position).add(new THREE.Vector3(24, 0, 24));
-  built.node.rotation.copy(src.mesh.rotation);
-  built.node.scale.copy(src.mesh.scale);
-  const copiedSculpt = isCustomGeomKind(src.kind) ? false : copySculptIfAny(src, built.node);
-  scene.add(built.node);
-  const newId = objIdCounter++;
-  built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, { id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null, sculpted: copiedSculpt, name: src.name ? (src.name + ' (copia)') : null, collapsed: false, splinePoints: src.splinePoints ? src.splinePoints.map(p => p.clone()) : undefined, splineSharp: src.splineSharp ? src.splineSharp.slice() : undefined, closed: !!src.closed, latheSegments: src.latheSegments, latheCaps: src.latheCaps !== false, tubeRootRadius: src.tubeRootRadius, tubeTipRadius: src.tubeTipRadius, tubeRadialSegments: src.tubeRadialSegments, extrudeDepth: src.extrudeDepth, extrudeBevel: src.extrudeBevel, extrudeBevelSize: src.extrudeBevelSize, text: src.text, fontKey: src.fontKey, textSize: src.textSize, textDepth: src.textDepth, textBevel: src.textBevel, textBevelSize: src.textBevelSize });
+  // Reporte de Andres: duplicar un Grupo (Nulo) antes solo clonaba la
+  // "cascara" vacia, sin lo que tenia adentro ni si ese Nulo era a su vez
+  // un Clonador/Simetria (ver "Pendiente" y deepCloneSubtree() mas arriba,
+  // en el archivo, junto a snapshotEntry/buildEntryFromSnapshot). Ahora
+  // clona TODO -- para una figura suelta sin hijos, el resultado es
+  // identico a como funcionaba antes.
+  const newId = deepCloneSubtree(id);
+  const clone = sceneObjects.get(newId);
+  clone.mesh.position.add(new THREE.Vector3(24, 0, 24));
+  clone.name = src.name ? (src.name + ' (copia)') : clone.name;
   renderLayerList();
   selectObject(newId);
   pushHistory();
@@ -758,55 +858,29 @@ function cloneObject(id) {
 
 function cloneObjectSymmetry(id) {
   const src = sceneObjects.get(id);
-  if (!src || src.kind === 'null') return;
-
+  if (!src) return;
   const srcLabel = src.name || KIND_LABEL[src.kind] || src.kind;
-  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
-  const extraOpts = {
-    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
-    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
-    opacity: src.mesh.material ? src.mesh.material.opacity : undefined,
-    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
-  };
-  if (isCustomGeomKind(src.kind)) extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
 
-  // 1. Crear el objeto espejo con material idéntico
-  const mirror = buildObject(src.kind, colorHex, extraOpts);
-  mirror.node.position.set(0, 0, 0);
-  mirror.node.rotation.set(src.mesh.rotation.x, -src.mesh.rotation.y, -src.mesh.rotation.z);
-  mirror.node.scale.copy(src.mesh.scale);
-  if (mirror.node.material && src.mesh.material) {
-    mirror.node.material = src.mesh.material.clone();
-    mirror.node.material.side = THREE.FrontSide;
-    mirror.node.material.needsUpdate = true;
+  // Reporte de Andres: la Simetria antes se negaba directamente a hacer
+  // nada sobre un Grupo (Nulo) -- ni hablar de un grupo que ya tuviera
+  // adentro un Clonador u otra Simetria. Ahora clona el Grupo ENTERO (con
+  // deepCloneSubtree, ver mas arriba en el archivo) y espeja en X cada
+  // nodo de esa copia (mirrorEntrySubtreeInPlace) -- para una figura suelta
+  // sin hijos, el resultado es identico a como funcionaba antes (mismo
+  // truco de espejar geometria + posicion + rotacion, solo que ahora
+  // factorizado en una funcion aparte para poder aplicarlo nodo por nodo).
+  const mirrorRootId = deepCloneSubtree(id);
+  mirrorEntrySubtreeInPlace(mirrorRootId);
+  const mirrorRoot = sceneObjects.get(mirrorRootId);
+  mirrorRoot.name = srcLabel + ' (Espejo X)';
+  mirrorRoot.isMirrorOf = id;
+  if (mirrorRoot.mesh.material && src.mesh.material) {
+    mirrorRoot.mesh.material.side = THREE.FrontSide;
   }
 
-  let copiedSculpt = false;
-  if (src.kind !== 'hair' && mirror.node.geometry && src.mesh.geometry) {
-    mirror.node.geometry = src.mesh.geometry.clone();
-    const geo = mirror.node.geometry;
-    const posAttr = geo.attributes.position;
-    for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
-    
-    // Invertir orden de vértices en los triángulos (winding) para que las normales apunten hacia afuera
-    if (geo.index) {
-      const idxArr = geo.index.array;
-      for (let i = 0; i < idxArr.length; i += 3) {
-        const tmp = idxArr[i + 1];
-        idxArr[i + 1] = idxArr[i + 2];
-        idxArr[i + 2] = tmp;
-      }
-      geo.index.needsUpdate = true;
-    }
-    posAttr.needsUpdate = true;
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
-    copiedSculpt = !!src.sculpted;
-  }
-
-  // 2. Crear el Nulo contenedor (Simetría)
+  // Crear el Nulo contenedor (Simetría), centrado entre el original y donde
+  // quedo el espejo (en X=0, ver mirrorEntrySubtreeInPlace de arriba).
   const nullBuilt = buildObject('null', undefined, {});
-  // Centrar el Nulo entre el original y donde irá el espejo (en X=0)
   const worldPos = new THREE.Vector3();
   src.mesh.getWorldPosition(worldPos);
   nullBuilt.node.position.set(0, worldPos.y, worldPos.z);
@@ -820,31 +894,14 @@ function cloneObjectSymmetry(id) {
     symmetrySourceId: id   // marca especial para saber cual es el original
   });
 
-  // 3. Meter el espejo dentro del Nulo
-  scene.add(mirror.node);
-  const mirrorId = objIdCounter++;
-  mirror.pickMesh.userData.ownerId = mirrorId;
-  sceneObjects.set(mirrorId, {
-    id: mirrorId, kind: src.kind, mesh: mirror.node, pickMesh: mirror.pickMesh,
-    visible: true, parentId: nullId, sculpted: copiedSculpt,
-    name: srcLabel + ' (Espejo X)', collapsed: false,
-    isMirrorOf: id   // marca especial
-  });
-  nullBuilt.node.attach(mirror.node); // conserva posicion mundo
-
-  // 4. Meter el original dentro del Nulo también
-  nullBuilt.node.attach(src.mesh); // conserva posicion mundo
+  // Meter el espejo y el original dentro del Nulo (`.attach()` conserva la
+  // posicion mundo de cada uno -- como el espejo ya quedo, entero, en su
+  // posicion mundo correctamente espejada antes de este paso, no hace
+  // falta ningun recalculo aparte para ubicarlo del lado opuesto).
+  nullBuilt.node.attach(mirrorRoot.mesh);
+  mirrorRoot.parentId = nullId;
+  nullBuilt.node.attach(src.mesh);
   src.parentId = nullId;
-
-  // 5. Posicionar el espejo al lado opuesto del original dentro del Nulo
-  const localPos = new THREE.Vector3();
-  src.mesh.parent.worldToLocal(worldPos.clone(), localPos);
-  src.mesh.getWorldPosition(worldPos);
-  nullBuilt.node.worldToLocal(worldPos);
-  src.mesh.position.copy(worldPos);
-  const mwp = worldPos.clone();
-  mwp.x = -worldPos.x;
-  mirror.node.position.copy(mwp);
 
   renderLayerList();
   selectObject(nullId);
@@ -980,6 +1037,21 @@ const dimRow = document.getElementById('dimRow');
 const symPropsSection = document.getElementById('symPropsSection');
 const clonerPropsSection = document.getElementById('clonerPropsSection');
 const textPropsSection = document.getElementById('textPropsSection');
+const lightPropsSection = document.getElementById('lightPropsSection');
+const lightPropsTitle = document.getElementById('lightPropsTitle');
+const lightColorInput = document.getElementById('lightColorInput');
+const lightIntensityInput = document.getElementById('lightIntensityInput');
+const lightIntensityVal = document.getElementById('lightIntensityVal');
+const lightDistanceInput = document.getElementById('lightDistanceInput');
+const lightDistanceVal = document.getElementById('lightDistanceVal');
+const lightDecayInput = document.getElementById('lightDecayInput');
+const lightDecayVal = document.getElementById('lightDecayVal');
+const lightSpotOnlyRow = document.getElementById('lightSpotOnlyRow');
+const lightAngleInput = document.getElementById('lightAngleInput');
+const lightAngleVal = document.getElementById('lightAngleVal');
+const lightPenumbraInput = document.getElementById('lightPenumbraInput');
+const lightPenumbraVal = document.getElementById('lightPenumbraVal');
+const lightShadowCheck = document.getElementById('lightShadowCheck');
 
 // Transform inputs
 const posX = document.getElementById('posX');
@@ -1139,6 +1211,33 @@ function selectObject(id) {
       propsWireframe.checked = !!entry.mesh.material.wireframe;
     } else {
       if (matSection) matSection.style.display = 'none';
+    }
+
+    // Propiedades de Luz (Puntual/Foco) -- no tienen material (mesh.material
+    // no existe, es un Group), asi que viven en su propia seccion aparte.
+    if (lightPropsSection) {
+      const isLight = isLightKind(entry.kind);
+      lightPropsSection.style.display = isLight ? 'block' : 'none';
+      if (isLight) {
+        const light = entry.mesh.userData.light;
+        lightPropsTitle.textContent = KIND_LABEL[entry.kind];
+        lightColorInput.value = '#' + (new THREE.Color(entry.lightColor != null ? entry.lightColor : 0xffe9b3)).getHexString();
+        lightIntensityInput.value = entry.lightIntensity != null ? entry.lightIntensity : (light ? light.intensity : 60);
+        lightIntensityVal.textContent = lightIntensityInput.value;
+        lightDistanceInput.value = entry.lightDistance != null ? entry.lightDistance : 0;
+        lightDistanceVal.textContent = lightDistanceInput.value;
+        lightDecayInput.value = entry.lightDecay != null ? entry.lightDecay : 2;
+        lightDecayVal.textContent = lightDecayInput.value;
+        lightShadowCheck.checked = !!entry.lightCastShadow;
+        const isSpot = entry.kind === 'light-spot';
+        lightSpotOnlyRow.style.display = isSpot ? 'block' : 'none';
+        if (isSpot) {
+          lightAngleInput.value = entry.lightAngle != null ? entry.lightAngle : 35;
+          lightAngleVal.textContent = lightAngleInput.value;
+          lightPenumbraInput.value = entry.lightPenumbra != null ? entry.lightPenumbra : 0.3;
+          lightPenumbraVal.textContent = lightPenumbraInput.value;
+        }
+      }
     }
 
     // Symmetry modifier properties
@@ -1433,6 +1532,89 @@ propsWireframe.addEventListener('change', () => {
       pushHistory();
     }
   }
+});
+
+// --- Propiedades de Luz (Puntual/Foco) en vivo ---
+function getSelectedLight() {
+  if (selectedId == null) return null;
+  const entry = sceneObjects.get(selectedId);
+  if (!entry || !isLightKind(entry.kind)) return null;
+  return { entry, light: entry.mesh.userData.light };
+}
+
+lightColorInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel) return;
+  const hex = parseInt(lightColorInput.value.replace('#', ''), 16);
+  sel.entry.lightColor = hex;
+  sel.light.color.set(hex);
+  if (sel.entry.mesh.userData.icon) sel.entry.mesh.userData.icon.material.color.set(hex);
+});
+lightColorInput.addEventListener('change', () => { pushHistory(); });
+
+lightIntensityInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel) return;
+  const val = parseFloat(lightIntensityInput.value);
+  sel.entry.lightIntensity = val;
+  sel.light.intensity = val;
+  lightIntensityVal.textContent = val;
+});
+lightIntensityInput.addEventListener('change', () => { pushHistory(); });
+
+lightDistanceInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel) return;
+  const val = parseFloat(lightDistanceInput.value);
+  sel.entry.lightDistance = val;
+  sel.light.distance = val;
+  lightDistanceVal.textContent = val;
+});
+lightDistanceInput.addEventListener('change', () => { pushHistory(); });
+
+lightDecayInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel) return;
+  const val = parseFloat(lightDecayInput.value);
+  sel.entry.lightDecay = val;
+  sel.light.decay = val;
+  lightDecayVal.textContent = val;
+});
+lightDecayInput.addEventListener('change', () => { pushHistory(); });
+
+lightAngleInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel || sel.entry.kind !== 'light-spot') return;
+  const val = parseFloat(lightAngleInput.value);
+  sel.entry.lightAngle = val;
+  sel.light.angle = THREE.MathUtils.degToRad(val);
+  lightAngleVal.textContent = val;
+});
+lightAngleInput.addEventListener('change', () => { pushHistory(); });
+
+lightPenumbraInput.addEventListener('input', () => {
+  const sel = getSelectedLight();
+  if (!sel || sel.entry.kind !== 'light-spot') return;
+  const val = parseFloat(lightPenumbraInput.value);
+  sel.entry.lightPenumbra = val;
+  sel.light.penumbra = val;
+  lightPenumbraVal.textContent = val;
+});
+lightPenumbraInput.addEventListener('change', () => { pushHistory(); });
+
+lightShadowCheck.addEventListener('change', () => {
+  const sel = getSelectedLight();
+  if (!sel) return;
+  sel.entry.lightCastShadow = lightShadowCheck.checked;
+  sel.light.castShadow = lightShadowCheck.checked;
+  if (lightShadowCheck.checked) {
+    sel.light.shadow.mapSize.width = 512;
+    sel.light.shadow.mapSize.height = 512;
+    sel.light.shadow.bias = -0.001;
+    sel.light.shadow.map?.dispose();
+    sel.light.shadow.map = null; // fuerza a three.js a rearmar el mapa de sombra con el tamano de arriba
+  }
+  pushHistory();
 });
 
 alignOriginBtn.addEventListener('click', () => {
@@ -1913,7 +2095,7 @@ function onHandleDrag(clientX, clientY) {
   let minRemDist = Infinity;
 
   sceneObjects.forEach((other, otherId) => {
-    if (otherId === selectedId || other.kind === 'null' || !other.visible) return;
+    if (otherId === selectedId || other.kind === 'null' || isLightKind(other.kind) || !other.visible) return;
     if (isDescendantOf(otherId, selectedId) || isDescendantOf(selectedId, otherId)) return;
     const boxB = new THREE.Box3().setFromObject(other.mesh);
     const candidates = [boxB.min[axis], boxB.max[axis]];
@@ -2013,7 +2195,7 @@ function applyLiveFurnitureSnap(id) {
 
   // 2. Snap magnético de caras y esquinas a otros objetos vecinos
   sceneObjects.forEach((other, otherId) => {
-    if (otherId === id || other.kind === 'null' || !other.visible) return;
+    if (otherId === id || other.kind === 'null' || isLightKind(other.kind) || !other.visible) return;
     if (isDescendantOf(otherId, id) || isDescendantOf(id, otherId)) return;
 
     const boxB = new THREE.Box3().setFromObject(other.mesh);
@@ -2166,7 +2348,7 @@ transform.addEventListener('objectChange', () => {
 
     // Distancia vertical a tabla inferior o suelo
     sceneObjects.forEach((other, otherId) => {
-      if (otherId === selectedId || other.kind === 'null' || !other.visible) return;
+      if (otherId === selectedId || other.kind === 'null' || isLightKind(other.kind) || !other.visible) return;
       if (isDescendantOf(otherId, selectedId) || isDescendantOf(selectedId, otherId)) return;
 
       const boxB = new THREE.Box3().setFromObject(other.mesh);
@@ -2878,6 +3060,71 @@ shadowToggle.addEventListener('change', () => {
   renderer.shadowMap.enabled = shadowToggle.checked;
 });
 
+// --- Entorno / HDRI ---
+// Nota: el HDRI cargado vive solo en memoria durante esta sesión -- no se
+// guarda como parte del diseño en "Guardar diseño" (el archivo .hdr puede
+// pesar varios MB, demasiado para el localStorage que usa esta app). Al
+// abrir un diseño guardado, hay que volver a cargar el HDRI si se quiere.
+const hdriFileInput = document.getElementById('hdriFileInput');
+const hdriControlsRow = document.getElementById('hdriControlsRow');
+const hdriIntensityInput = document.getElementById('hdriIntensityInput');
+const hdriIntensityVal = document.getElementById('hdriIntensityVal');
+const hdriBackgroundCheck = document.getElementById('hdriBackgroundCheck');
+const hdriClearBtn = document.getElementById('hdriClearBtn');
+const hdriLoadingMsg = document.getElementById('hdriLoadingMsg');
+const hdriLoader = new HDRLoader();
+
+function clearHDRI() {
+  scene.environment = null;
+  scene.background = null; // vuelve al color de fondo de siempre (ver renderer.setClearColor mas abajo, si existe)
+  if (currentEnvRenderTarget) {
+    currentEnvRenderTarget.dispose();
+    currentEnvRenderTarget = null;
+  }
+  hdriControlsRow.style.display = 'none';
+}
+
+async function loadHDRIFile(file) {
+  hdriLoadingMsg.style.display = 'block';
+  const url = URL.createObjectURL(file);
+  try {
+    const texture = await hdriLoader.loadAsync(url);
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    const renderTarget = pmremGenerator.fromEquirectangular(texture);
+    texture.dispose();
+    if (currentEnvRenderTarget) currentEnvRenderTarget.dispose();
+    currentEnvRenderTarget = renderTarget;
+    scene.environment = renderTarget.texture;
+    if ('environmentIntensity' in scene) scene.environmentIntensity = parseFloat(hdriIntensityInput.value);
+    if (hdriBackgroundCheck.checked) scene.background = renderTarget.texture;
+    hdriControlsRow.style.display = 'block';
+  } catch (err) {
+    console.error('No se pudo cargar el HDRI:', err);
+    alert('No se pudo cargar ese archivo como HDRI. ¿Es un archivo .hdr válido?');
+  } finally {
+    URL.revokeObjectURL(url);
+    hdriLoadingMsg.style.display = 'none';
+  }
+}
+
+hdriFileInput.addEventListener('change', () => {
+  const file = hdriFileInput.files && hdriFileInput.files[0];
+  if (file) loadHDRIFile(file);
+  hdriFileInput.value = ''; // permite volver a elegir el MISMO archivo despues de "Quitar HDRI"
+});
+
+hdriIntensityInput.addEventListener('input', () => {
+  hdriIntensityVal.textContent = hdriIntensityInput.value;
+  if ('environmentIntensity' in scene) scene.environmentIntensity = parseFloat(hdriIntensityInput.value);
+});
+
+hdriBackgroundCheck.addEventListener('change', () => {
+  if (!currentEnvRenderTarget) return;
+  scene.background = hdriBackgroundCheck.checked ? currentEnvRenderTarget.texture : null;
+});
+
+hdriClearBtn.addEventListener('click', clearHDRI);
+
 function updateCanvasDimensions() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
   if (w <= 0 || h <= 0) return;
@@ -3088,7 +3335,16 @@ let history = [];
 let historyIndex = -1;
 
 function snapshotScene() {
-  return Array.from(sceneObjects.values()).map(e => {
+  return Array.from(sceneObjects.values()).map(snapshotEntry);
+}
+
+// Convierte UNA figura de sceneObjects a un objeto plano (JSON-friendly),
+// con TODOS sus parametros reconstruibles -- separado de snapshotScene()
+// (que solo la llama para cada figura de la escena) para poder reusarlo
+// tambien en deepCloneSubtree() (clonar un Grupo/Nulo entero, con todo lo
+// que tiene adentro, ver mas abajo) sin repetir esta lista larga de campos
+// en dos lugares.
+function snapshotEntry(e) {
     const s = {
       id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
       name: e.name || null, collapsed: !!e.collapsed,
@@ -3124,7 +3380,14 @@ function snapshotScene() {
       symmetrySourceId: e.symmetrySourceId != null ? e.symmetrySourceId : null,
       symAxis: e.symAxis || null,
       symOffset: e.symOffset != null ? e.symOffset : null,
-      isMirrorOf: e.isMirrorOf != null ? e.isMirrorOf : null
+      isMirrorOf: e.isMirrorOf != null ? e.isMirrorOf : null,
+      lightColor: e.lightColor != null ? e.lightColor : null,
+      lightIntensity: e.lightIntensity != null ? e.lightIntensity : null,
+      lightDistance: e.lightDistance != null ? e.lightDistance : null,
+      lightDecay: e.lightDecay != null ? e.lightDecay : null,
+      lightAngle: e.lightAngle != null ? e.lightAngle : null,
+      lightPenumbra: e.lightPenumbra != null ? e.lightPenumbra : null,
+      lightCastShadow: e.lightCastShadow != null ? !!e.lightCastShadow : null
     };
     if (isCustomGeomKind(e.kind) && e.mesh.geometry) {
       s.hairGeometry = serializeGeometry(e.mesh.geometry);
@@ -3165,7 +3428,100 @@ function snapshotScene() {
       s.sculptPositions = Array.from(e.mesh.geometry.attributes.position.array);
     }
     return s;
-  });
+}
+
+// Reconstruye UNA figura suelta (sin registrarla en sceneObjects ni
+// resolver de que grupo es hijo) a partir de un snapshot armado por
+// snapshotEntry() -- separado de rebuildSceneFrom() (deshacer/rehacer,
+// abrir diseño) para poder reusarlo tambien en deepCloneSubtree() (clonar
+// un Grupo/Nulo entero, ver mas abajo) sin repetir esta lista larga de
+// campos en dos lugares. Devuelve la entry lista para agregar a
+// sceneObjects/scene y (si corresponde) parentear.
+function buildEntryFromSnapshot(s) {
+  const extraOpts = {
+    roughness: s.roughness,
+    metalness: s.metalness,
+    opacity: s.opacity,
+    wireframe: s.wireframe,
+    geometryData: s.hairGeometry,
+    closed: !!s.closed,
+    lightColor: s.lightColor != null ? s.lightColor : undefined,
+    lightIntensity: s.lightIntensity != null ? s.lightIntensity : undefined,
+    lightDistance: s.lightDistance != null ? s.lightDistance : undefined,
+    lightDecay: s.lightDecay != null ? s.lightDecay : undefined,
+    lightAngle: s.lightAngle != null ? s.lightAngle : undefined,
+    lightPenumbra: s.lightPenumbra != null ? s.lightPenumbra : undefined,
+    lightCastShadow: s.lightCastShadow != null ? s.lightCastShadow : undefined
+  };
+  const built = buildObject(s.kind, s.color != null ? s.color : undefined, extraOpts);
+  built.node.position.set(s.px, s.py, s.pz);
+  built.node.rotation.set(s.rx, s.ry, s.rz);
+  built.node.scale.set(s.sx, s.sy, s.sz);
+  built.node.visible = s.visible;
+  let sculpted = false;
+  if (!isCustomGeomKind(s.kind) && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
+      built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
+    built.node.geometry.attributes.position.array.set(s.sculptPositions);
+    built.node.geometry.attributes.position.needsUpdate = true;
+    built.node.geometry.computeVertexNormals();
+    built.node.geometry.computeBoundingSphere();
+    sculpted = true;
+  }
+  built.pickMesh.userData.ownerId = s.id;
+  return {
+    id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
+    visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
+    sculpted, name: s.name || null, collapsed: !!s.collapsed,
+    clonerMode: s.clonerMode || null,
+    clonerCount: s.clonerCount != null ? s.clonerCount : null,
+    clonerSourceId: s.clonerSourceId != null ? s.clonerSourceId : null,
+    clonerChildIds: s.clonerChildIds ? [...s.clonerChildIds] : null,
+    sepX: s.sepX, sepY: s.sepY, sepZ: s.sepZ,
+    radius: s.radius, rotCopies: s.rotCopies,
+    clonerAxis: s.clonerAxis || null,
+    clonerRotAxis: s.clonerRotAxis || null,
+    circleCenter: s.circleCenter ? { x: s.circleCenter.x, y: s.circleCenter.y, z: s.circleCenter.z } : null,
+    gridX: s.gridX != null ? s.gridX : null,
+    gridY: s.gridY != null ? s.gridY : null,
+    gridZ: s.gridZ != null ? s.gridZ : null,
+    gridRotDeg: s.gridRotDeg != null ? s.gridRotDeg : null,
+    gridRotAxis: s.gridRotAxis || null,
+    symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
+    symAxis: s.symAxis, symOffset: s.symOffset,
+    isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
+    lightColor: s.lightColor != null ? s.lightColor : undefined,
+    lightIntensity: s.lightIntensity != null ? s.lightIntensity : undefined,
+    lightDistance: s.lightDistance != null ? s.lightDistance : undefined,
+    lightDecay: s.lightDecay != null ? s.lightDecay : undefined,
+    lightAngle: s.lightAngle != null ? s.lightAngle : undefined,
+    lightPenumbra: s.lightPenumbra != null ? s.lightPenumbra : undefined,
+    lightCastShadow: s.lightCastShadow != null ? !!s.lightCastShadow : undefined,
+    splinePoints: s.splinePoints ? s.splinePoints.map(a => new THREE.Vector3(a[0], a[1], a[2])) : undefined,
+    splineSharp: s.splineSharp ? s.splineSharp.slice() : undefined,
+    closed: !!s.closed,
+    latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
+    latheCaps: s.latheCaps !== false,
+    tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
+    tubeTipRadius: s.tubeTipRadius != null ? s.tubeTipRadius : undefined,
+    tubeRadialSegments: s.tubeRadialSegments != null ? s.tubeRadialSegments : undefined,
+    extrudeDepth: s.extrudeDepth != null ? s.extrudeDepth : undefined,
+    extrudeBevel: s.extrudeBevel != null ? s.extrudeBevel : undefined,
+    extrudeBevelSize: s.extrudeBevelSize != null ? s.extrudeBevelSize : undefined,
+    text: s.text != null ? s.text : undefined,
+    fontKey: s.fontKey || undefined,
+    textSize: s.textSize != null ? s.textSize : undefined,
+    textDepth: s.textDepth != null ? s.textDepth : undefined,
+    textBevel: s.textBevel != null ? s.textBevel : undefined,
+    textBevelSize: s.textBevelSize != null ? s.textBevelSize : undefined,
+    textSplineTargetId: s.textSplineTargetId != null ? s.textSplineTargetId : null,
+    textLetterCount: s.textLetterCount != null ? s.textLetterCount : undefined,
+    textStartPercent: s.textStartPercent != null ? s.textStartPercent : undefined,
+    textCoveragePercent: s.textCoveragePercent != null ? s.textCoveragePercent : undefined,
+    textAlignToTangent: s.textAlignToTangent !== false,
+    textFlipUp: !!s.textFlipUp,
+    textReverseDirection: !!s.textReverseDirection,
+    textTiltDeg: s.textTiltDeg != null ? s.textTiltDeg : undefined
+  };
 }
 
 function rebuildSceneFrom(snap) {
@@ -3176,77 +3532,9 @@ function rebuildSceneFrom(snap) {
   // Primera pasada: crear todo suelto (a nivel raiz) con su transform local
   // ya cargado.
   snap.forEach(s => {
-    const extraOpts = {
-      roughness: s.roughness,
-      metalness: s.metalness,
-      opacity: s.opacity,
-      wireframe: s.wireframe,
-      geometryData: s.hairGeometry,
-      closed: !!s.closed
-    };
-    const built = buildObject(s.kind, s.color != null ? s.color : undefined, extraOpts);
-    built.node.position.set(s.px, s.py, s.pz);
-    built.node.rotation.set(s.rx, s.ry, s.rz);
-    built.node.scale.set(s.sx, s.sy, s.sz);
-    built.node.visible = s.visible;
-    let sculpted = false;
-    if (!isCustomGeomKind(s.kind) && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
-        built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
-      built.node.geometry.attributes.position.array.set(s.sculptPositions);
-      built.node.geometry.attributes.position.needsUpdate = true;
-      built.node.geometry.computeVertexNormals();
-      built.node.geometry.computeBoundingSphere();
-      sculpted = true;
-    }
-    scene.add(built.node);
-    built.pickMesh.userData.ownerId = s.id;
-    sceneObjects.set(s.id, {
-      id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
-      visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
-      sculpted, name: s.name || null, collapsed: !!s.collapsed,
-      clonerMode: s.clonerMode || null,
-      clonerCount: s.clonerCount != null ? s.clonerCount : null,
-      clonerSourceId: s.clonerSourceId != null ? s.clonerSourceId : null,
-      clonerChildIds: s.clonerChildIds ? [...s.clonerChildIds] : null,
-      sepX: s.sepX, sepY: s.sepY, sepZ: s.sepZ,
-      radius: s.radius, rotCopies: s.rotCopies,
-      clonerAxis: s.clonerAxis || null,
-      clonerRotAxis: s.clonerRotAxis || null,
-      circleCenter: s.circleCenter ? { x: s.circleCenter.x, y: s.circleCenter.y, z: s.circleCenter.z } : null,
-      gridX: s.gridX != null ? s.gridX : null,
-      gridY: s.gridY != null ? s.gridY : null,
-      gridZ: s.gridZ != null ? s.gridZ : null,
-      gridRotDeg: s.gridRotDeg != null ? s.gridRotDeg : null,
-      gridRotAxis: s.gridRotAxis || null,
-      symmetrySourceId: s.symmetrySourceId != null ? s.symmetrySourceId : null,
-      symAxis: s.symAxis, symOffset: s.symOffset,
-      isMirrorOf: s.isMirrorOf != null ? s.isMirrorOf : null,
-      splinePoints: s.splinePoints ? s.splinePoints.map(a => new THREE.Vector3(a[0], a[1], a[2])) : undefined,
-      splineSharp: s.splineSharp ? s.splineSharp.slice() : undefined,
-      closed: !!s.closed,
-      latheSegments: s.latheSegments != null ? s.latheSegments : undefined,
-      latheCaps: s.latheCaps !== false,
-      tubeRootRadius: s.tubeRootRadius != null ? s.tubeRootRadius : undefined,
-      tubeTipRadius: s.tubeTipRadius != null ? s.tubeTipRadius : undefined,
-      tubeRadialSegments: s.tubeRadialSegments != null ? s.tubeRadialSegments : undefined,
-      extrudeDepth: s.extrudeDepth != null ? s.extrudeDepth : undefined,
-      extrudeBevel: s.extrudeBevel != null ? s.extrudeBevel : undefined,
-      extrudeBevelSize: s.extrudeBevelSize != null ? s.extrudeBevelSize : undefined,
-      text: s.text != null ? s.text : undefined,
-      fontKey: s.fontKey || undefined,
-      textSize: s.textSize != null ? s.textSize : undefined,
-      textDepth: s.textDepth != null ? s.textDepth : undefined,
-      textBevel: s.textBevel != null ? s.textBevel : undefined,
-      textBevelSize: s.textBevelSize != null ? s.textBevelSize : undefined,
-      textSplineTargetId: s.textSplineTargetId != null ? s.textSplineTargetId : null,
-      textLetterCount: s.textLetterCount != null ? s.textLetterCount : undefined,
-      textStartPercent: s.textStartPercent != null ? s.textStartPercent : undefined,
-      textCoveragePercent: s.textCoveragePercent != null ? s.textCoveragePercent : undefined,
-      textAlignToTangent: s.textAlignToTangent !== false,
-      textFlipUp: !!s.textFlipUp,
-      textReverseDirection: !!s.textReverseDirection,
-      textTiltDeg: s.textTiltDeg != null ? s.textTiltDeg : undefined
-    });
+    const entry = buildEntryFromSnapshot(s);
+    scene.add(entry.mesh);
+    sceneObjects.set(s.id, entry);
     if (s.id > maxId) maxId = s.id;
   });
   // Segunda pasada: aplicar quien esta adentro de que grupo -- usa .add()
@@ -3266,6 +3554,141 @@ function rebuildSceneFrom(snap) {
 function restoreSnapshot(snap) {
   rebuildSceneFrom(snap);
   updateHistoryButtons();
+}
+
+// Devuelve el id de la figura + TODOS sus descendientes (recursivo por
+// parentId, sin importar cuantos niveles de grupos haya) -- cada padre
+// aparece antes que sus hijos.
+function getSubtreeIds(rootId) {
+  const ids = [rootId];
+  for (let i = 0; i < ids.length; i++) {
+    const pid = ids[i];
+    sceneObjects.forEach(e => { if (e.parentId === pid) ids.push(e.id); });
+  }
+  return ids;
+}
+
+// Reporte de Andres: "las clonaciones y simetria tambien deben funcionar
+// cuando hay grupos hechos, si el grupo ya lleva clonaciones, simetria
+// deben funcionar igual". Antes, tanto Duplicar (📋) como el Clonador de
+// matriz clonaban un Grupo/Nulo como una cascara VACIA -- ni copiaban lo
+// que tenia adentro, ni conservaban que ESE Nulo fuera a su vez un
+// Clonador o una Simetria (ver "Pendiente": "Clonar un grupo no clona lo
+// que tiene adentro"). Esta funcion clona una figura CUALQUIERA -- y, si
+// es un Grupo, TODO su contenido, recursivamente, sin importar cuantos
+// niveles de grupos/Clonadores/Simetrias anidados tenga adentro.
+//
+// Se apoya en snapshotEntry()/buildEntryFromSnapshot() -- el mismo
+// mecanismo ya probado a fondo por Deshacer/Rehacer y Guardar/Abrir --
+// asi cada figura (con su geometria, parametros de generador, texto, etc.)
+// sale identica a como saldria de un Ctrl+Z, sin repetir esa lista larga
+// de campos en un tercer lugar.
+//
+// Devuelve el id de la copia de la RAIZ. Los hijos clonados quedan
+// parenteados con `.add()` (no `.attach()`) conservando su transform LOCAL
+// tal cual el original -- para que la copia completa se mueva/rote como
+// una unidad rigida sin importar donde la reposicione despues quien llamo
+// a esta funcion (el Clonador la reubica en su formula de posiciones; la
+// Simetria la espeja entera con mirrorEntrySubtreeInPlace, ver abajo). La
+// raiz queda SUELTA (agregada directo a `scene`, sin padre) -- reparentarla
+// es responsabilidad de quien llama.
+function deepCloneSubtree(rootId) {
+  const ids = getSubtreeIds(rootId);
+  const oldToNew = new Map();
+
+  ids.forEach(oldId => {
+    const src = sceneObjects.get(oldId);
+    const snap = snapshotEntry(src);
+    snap.id = objIdCounter++;
+    snap.parentId = null; // se resuelve mas abajo, con los ids ya mapeados
+    const entry = buildEntryFromSnapshot(snap);
+    scene.add(entry.mesh);
+    sceneObjects.set(snap.id, entry);
+    oldToNew.set(oldId, snap.id);
+  });
+
+  // Un Clonador Circular guarda su centro (`circleCenter`) en espacio
+  // MUNDO, calculado una sola vez al crearlo (ver circularSlotPosition) --
+  // si esta copia entera termina reubicada en otro lugar del mundo (porque
+  // la reposiciono el Clonador de matriz, o la espejo la Simetria), ese
+  // centro viejo quedaria apuntando al lugar de ANTES de clonar, corriendo
+  // el circulo la proxima vez que se toque un control de ESE clonador
+  // anidado. Se lo saca de la copia -- `updateClonerLive()` ya sabe
+  // auto-repararse tomando la posicion ACTUAL como centro nuevo la primera
+  // vez que lo note faltante (el mismo mecanismo ya probado para diseños
+  // viejos, ver el bug "queda una al medio"), y para cuando se llega aca la
+  // posicion de esta copia ya es la definitiva.
+  ids.forEach(oldId => {
+    const dst = sceneObjects.get(oldToNew.get(oldId));
+    if (dst.clonerMode === 'circular') dst.circleCenter = null;
+  });
+
+  // Rearmar el arbol (mismos padres/hijos relativos que el original) y
+  // volver a apuntar las referencias cruzadas (Clonador->original/copias,
+  // Simetria->espejo, Texto->curva-objetivo) a la copia nueva
+  // correspondiente -- SOLO si el objetivo tambien es parte de este mismo
+  // grupo clonado. Si algo apuntara a una figura de AFUERA del grupo (por
+  // ejemplo un Texto "adaptado a curva" con la curva en otro lado de la
+  // escena), el vinculo se CORTA (null), no se deja apuntando a la figura
+  // vieja -- mismo criterio ya usado por Duplicar (📋) de siempre: clonar
+  // rompe vínculos especiales hacia AFUERA de lo que se esta clonando, para
+  // que el clon quede independiente en vez de compartir a escondidas.
+  const remap = (v) => (v != null && oldToNew.has(v)) ? oldToNew.get(v) : null;
+  ids.forEach(oldId => {
+    const src = sceneObjects.get(oldId);
+    const dst = sceneObjects.get(oldToNew.get(oldId));
+    if (src.parentId != null && oldToNew.has(src.parentId)) {
+      sceneObjects.get(oldToNew.get(src.parentId)).mesh.add(dst.mesh);
+      dst.parentId = oldToNew.get(src.parentId);
+    }
+    dst.clonerSourceId = remap(dst.clonerSourceId);
+    if (Array.isArray(dst.clonerChildIds)) dst.clonerChildIds = dst.clonerChildIds.map(remap).filter(v => v != null);
+    dst.symmetrySourceId = remap(dst.symmetrySourceId);
+    dst.isMirrorOf = remap(dst.isMirrorOf);
+    dst.textSplineTargetId = remap(dst.textSplineTargetId);
+  });
+
+  return oldToNew.get(rootId);
+}
+
+// Espeja en X, EN EL LUGAR, cada nodo de un grupo ya clonado (ver
+// deepCloneSubtree) -- el mismo truco que ya se usaba para espejar una
+// sola figura (negar posicion X, negar rotacion Y/Z, invertir el orden de
+// los vertices de cada triangulo + recalcular normales si tiene geometria
+// propia) pero aplicado a TODOS los niveles de la jerarquia, no solo a la
+// raiz. Espejar cada nivel de la misma forma se compone bien a traves de
+// una cadena de padres/hijos (es la misma tecnica que usa cualquier
+// programa 3D para espejar un grupo/armazon entero, no figura por figura
+// a mano) -- asi la Simetria tambien funciona sobre un Grupo completo,
+// incluyendo cualquier Clonador/Simetria que ya tuviera adentro.
+function mirrorEntrySubtreeInPlace(rootId) {
+  const ids = getSubtreeIds(rootId);
+  ids.forEach(id => {
+    const e = sceneObjects.get(id);
+    e.mesh.position.x = -e.mesh.position.x;
+    e.mesh.rotation.y = -e.mesh.rotation.y;
+    e.mesh.rotation.z = -e.mesh.rotation.z;
+    // El pelo (hair) queda afuera a proposito, igual que en el espejo de
+    // una sola figura de siempre: su geometria no se vuelve a espejar (ver
+    // "Pendiente" -- limitacion conocida), solo su posicion/rotacion.
+    if (e.kind !== 'hair' && e.mesh.geometry && e.mesh.geometry.attributes.position) {
+      const geo = e.mesh.geometry;
+      const posAttr = geo.attributes.position;
+      for (let i = 0; i < posAttr.count; i++) posAttr.setX(i, -posAttr.getX(i));
+      if (geo.index) {
+        const idxArr = geo.index.array;
+        for (let t = 0; t < idxArr.length; t += 3) {
+          const tmp = idxArr[t + 1];
+          idxArr[t + 1] = idxArr[t + 2];
+          idxArr[t + 2] = tmp;
+        }
+        geo.index.needsUpdate = true;
+      }
+      posAttr.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+    }
+  });
 }
 
 function pushHistory() {
@@ -3449,7 +3872,7 @@ function exportToOBJ() {
   let uvOffset = 1;
 
   sceneObjects.forEach((entry, id) => {
-    if (!entry.visible || entry.kind === 'null' || !entry.mesh) return;
+    if (!entry.visible || entry.kind === 'null' || isLightKind(entry.kind) || !entry.mesh) return;
 
     const mesh = entry.mesh;
     const name = entry.name || (KIND_LABEL[entry.kind] + '_' + id);
@@ -5558,28 +5981,21 @@ arrayModal && arrayModal.addEventListener('click', e => { if (e.target === array
 
 // Helper: deep-clone a sceneObject entry into the scene
 function cloneEntryAt(src, positionWorld) {
-  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
-  const extraOpts = {
-    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
-    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
-    opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
-    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
-  };
-  if (isCustomGeomKind(src.kind)) extraOpts.geometryData = serializeGeometry(src.mesh.geometry);
-  if (src.kind === 'spline') extraOpts.closed = !!src.closed;
-  const built = buildObject(src.kind, colorHex, extraOpts);
-  built.node.rotation.copy(src.mesh.rotation);
-  built.node.scale.copy(src.mesh.scale);
-  if (!isCustomGeomKind(src.kind)) copySculptIfAny(src, built.node);
-  built.node.position.copy(positionWorld);
-  scene.add(built.node);
-  const newId = objIdCounter++;
-  built.pickMesh.userData.ownerId = newId;
-  sceneObjects.set(newId, {
-    id: newId, kind: src.kind, mesh: built.node, pickMesh: built.pickMesh,
-    visible: true, parentId: null, sculpted: !!src.sculpted,
-    name: src.name ? src.name + ' (copia)' : null, collapsed: false
-  });
+  // Reporte de Andres: el Clonador de matriz (Lineal/Circular/Cuadricula)
+  // usa esta funcion para cada copia -- si `src` era un Grupo (Nulo), antes
+  // solo se creaba una cascara vacia (ver "Pendiente" y deepCloneSubtree(),
+  // definida junto a snapshotEntry/buildEntryFromSnapshot mas arriba en el
+  // archivo), asi que clonar circularmente/en grilla/en fila un grupo que
+  // ya tenia figuras (o un Clonador/Simetria) adentro no mostraba nada
+  // nuevo. Ahora clona TODO el contenido -- para una figura suelta sin
+  // hijos, el resultado es identico a como funcionaba antes (de paso, de
+  // yapa, tambien quedan copiadas splinePoints/parametros de generador que
+  // antes esta funcion en particular no copiaba, ver nota tecnica sobre el
+  // Clonador de matriz).
+  const newId = deepCloneSubtree(src.id);
+  const clone = sceneObjects.get(newId);
+  clone.mesh.position.copy(positionWorld);
+  clone.name = src.name ? src.name + ' (copia)' : clone.name;
   return newId;
 }
 
@@ -5913,7 +6329,7 @@ const partsListCloseBtn = document.getElementById('partsListCloseBtn');
 function buildPartsList() {
   const rows = [];
   sceneObjects.forEach(entry => {
-    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair' || entry.kind === 'spline') return;
+    if (!entry.visible || entry.kind === 'null' || isLightKind(entry.kind) || entry.kind === 'hair' || entry.kind === 'spline') return;
     if (!entry.mesh.geometry) return;
     entry.mesh.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(entry.mesh);
@@ -5963,7 +6379,7 @@ function exportSceneAsOBJ() {
   let objStr = '# Exportado desde 3DPro\n\n';
   let vOffset = 1;
   sceneObjects.forEach(entry => {
-    if (!entry.visible || entry.kind === 'null' || entry.kind === 'hair' || entry.kind === 'spline') return;
+    if (!entry.visible || entry.kind === 'null' || isLightKind(entry.kind) || entry.kind === 'hair' || entry.kind === 'spline') return;
     if (!entry.mesh.geometry) return;
     const objName = (entry.name || KIND_LABEL[entry.kind] || entry.kind).replace(/\s+/g, '_');
     objStr += `o ${objName}\n`;
