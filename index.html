@@ -246,7 +246,17 @@
     outline: none; border-color: var(--accent);
   }
   .modal-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  #arrayLinearOpts, #arrayCircularOpts { display: flex; flex-direction: column; gap: 10px; }
+  /* Bug real (sept. 2026): a esta regla le faltaba "#arrayGridOpts" -- ese
+     contenedor solo tenia el "display:flex" puesto por JS al elegir el modo
+     Cuadricula (arrayMode.addEventListener('change', ...)), sin ningun
+     "flex-direction" propio. Sin flex-direction:column, un flex container
+     usa "row" por defecto: los 3 parrafos + 3 filas de campos quedaban
+     todos apretados en una sola fila horizontal, cada uno comprimido a un
+     ancho minimo -- las etiquetas ("Cols (X)", "Filas (Z)", "Sep Z"...) se
+     veian pegadas/superpuestas unas con otras. Lineal y Circular ya tenian
+     el flex-direction:column puesto aca, por eso solo Cuadricula se veia
+     desordenada. */
+  #arrayLinearOpts, #arrayCircularOpts, #arrayGridOpts { display: flex; flex-direction: column; gap: 10px; }
 
   /* 5. Bottom Status Bar */
   #statusBar {
@@ -731,7 +741,19 @@
               </select>
             </div>
             <div class="prop-row" id="clonerGridRow" style="display:none;">
-              <label>Girar cada copia: <span id="clonerGridRotVal">0</span>°</label>
+              <label>Copias por eje (Cols X / Pisos Y / Filas Z)</label>
+              <div class="axis-row">
+                <div class="axis-input-wrap"><span class="axis-tag tag-x">X</span><input id="clonerGridXInput" class="axis-input" type="number" value="3" min="1" max="20"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-y">Y</span><input id="clonerGridYInput" class="axis-input" type="number" value="1" min="1" max="20"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-z">Z</span><input id="clonerGridZInput" class="axis-input" type="number" value="3" min="1" max="20"></div>
+              </div>
+              <label style="margin-top:8px; display:block;">Separación X / Y / Z (mm)</label>
+              <div class="axis-row">
+                <div class="axis-input-wrap"><span class="axis-tag tag-x">X</span><input id="clonerGridSepXInput" class="axis-input" type="number" value="80" step="10"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-y">Y</span><input id="clonerGridSepYInput" class="axis-input" type="number" value="80" step="10"></div>
+                <div class="axis-input-wrap"><span class="axis-tag tag-z">Z</span><input id="clonerGridSepZInput" class="axis-input" type="number" value="80" step="10"></div>
+              </div>
+              <label style="margin-top:8px; display:block;">Girar cada copia: <span id="clonerGridRotVal">0</span>°</label>
               <input id="clonerGridRotInput" type="range" min="0" max="360" step="5" value="0">
               <label style="margin-top:8px; display:block;">Eje de giro</label>
               <select id="clonerGridRotAxisSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
@@ -852,6 +874,19 @@
                 <label style="font-size:12px; color:#9aa0a8;">Textura cargada — el Color Base de arriba queda como tinte.</label>
               </div>
               <button id="materialTextureClearBtn" class="context-btn btn-danger" style="justify-content:center;">🗑️ Quitar Textura</button>
+            </div>
+            <!-- Solo para una Calcomania (logo con imagen PNG): convertirla
+                 de un plano chato a una figura 3D solida con la silueta
+                 exacta del logo -- ver applyDecalExtrusion en main.js. -->
+            <div id="propsDecalExtrudeRow" style="display:none;">
+              <div class="prop-row">
+                <label>Extrusión (mm)</label>
+                <input id="propsDecalExtrusion" type="number" min="0" max="200" step="0.5" value="0">
+              </div>
+              <div id="propsDecalSideColorRow" class="prop-row" style="display:none;">
+                <label>Color lateral</label>
+                <input id="propsDecalSideColor" type="color" value="#27314a">
+              </div>
             </div>
           </div>
         </div>

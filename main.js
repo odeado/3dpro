@@ -753,23 +753,317 @@ function applyTextureToMaterial(mat, texture) {
   mat.needsUpdate = true;
 }
 
+// Un material de una figura puede ser UN solo THREE.Material (la mayoria de
+// las figuras) o un ARRAY de dos (una Calcomania extruida: [0]=frente/atras
+// con la imagen, [1]=lados solidos, ver "Extrusion de Calcomania" mas abajo).
+// Estas dos funciones dejan que el resto del código (panel de Atributos,
+// sincronizacion en vivo de Clonador/Simetria, etc.) trate "la" materia
+// principal de una figura sin tener que acordarse en cada lugar de si es un
+// array o no.
+function getFrontMaterial(entry) {
+  const m = entry.mesh.material;
+  return Array.isArray(m) ? m[0] : m;
+}
+function getSideMaterial(entry) {
+  const m = entry.mesh.material;
+  return Array.isArray(m) ? (m[1] || null) : null;
+}
+function forEachMaterial(entry, fn) {
+  const m = entry.mesh.material;
+  if (!m) return;
+  (Array.isArray(m) ? m : [m]).forEach(fn);
+}
+
 async function applyTextureToEntry(entry, file) {
   const { dataUrl, width, height, texture } = await loadTextureFromFile(file);
   entry.textureDataUrl = dataUrl;
   entry.textureAspect = width / height;
-  if (entry.mesh.material) applyTextureToMaterial(entry.mesh.material, texture);
+  // Una imagen NUEVA invalida cualquier contorno ya trazado de la Extrusion
+  // de Calcomania (ver mas abajo) -- si estaba extruida, se vuelve a trazar
+  // sola con la imagen nueva la proxima vez que haga falta (applyDecalExtrusion).
+  entry._decalShapes = null;
+  const mat = getFrontMaterial(entry);
+  if (mat) applyTextureToMaterial(mat, texture);
+  if (entry.decalExtrusion) applyDecalExtrusion(entry, entry.decalExtrusion);
   return { width, height };
 }
 
 function clearEntryTexture(entry) {
   entry.textureDataUrl = null;
   entry.textureAspect = null;
-  const mat = entry.mesh.material;
+  entry._decalShapes = null;
+  const mat = getFrontMaterial(entry);
   if (mat) {
     mat.map = null;
     mat.transparent = mat.opacity < 1.0;
     mat.needsUpdate = true;
   }
+  // Sin imagen no hay nada que extruir -- una Calcomania sin textura vuelve
+  // a ser un plano comun (mismo criterio que "Quitar Textura" en cualquier
+  // otra figura).
+  if (entry.decalExtrusion) applyDecalExtrusion(entry, 0);
+}
+
+// ===================== Extrusión de Calcomanía (logo 3D sólido) =====================
+// Reporte de Andres, con capturas de un Clonador circular sobre una
+// Calcomania: "ahora si, podremos agregarle extrude a los logos?" -- pide
+// que el logo (hoy un plano con una imagen PNG pegada, ver mas arriba) se
+// pueda convertir en una figura 3D SOLIDA con la silueta exacta del logo
+// (como cortada con laser y con volumen), en vez de quedar siempre chata.
+//
+// La idea: trazar el CONTORNO del canal alfa de la imagen (que pixeles son
+// "parte del logo" y cuales son fondo transparente) y extruirlo con
+// THREE.ExtrudeGeometry -- el mismo generador que ya usa Texto 3D y el
+// generador "Extrusion" de un perfil dibujado a mano, solo que el perfil
+// aca sale de la imagen en vez de dibujarse con el lapiz.
+//
+// Trazado ("marching squares" simplificado): en vez de la tabla clasica de
+// 16 casos con sus 2 variantes ambiguas, se recorre cada celda "adentro" de
+// la mascara y se agrega, por cada lado que da a una celda "afuera" (o al
+// borde de la imagen), UN SEGMENTO fijo para ese lado -- esto es mas simple
+// de razonar y no tiene casos ambiguos aparte de un pixel tocando a otro
+// solo por la diagonal (ver mas abajo), y al recorrer cada segmento a partir
+// del anterior arma solo, sin ambigüedad, loops CERRADOS: el contorno
+// externo de una isla queda en un sentido y el de un agujero (una letra
+// como "O" o "A") sale con el sentido CONTRARIO -- eso es exactamente lo
+// que necesita THREE.Shape para saber cual anillo restar de cual (holes).
+const DECAL_TRACE_MAX_DIM = 220; // resolucion de la grilla de rastreo -- mas alto = contorno mas fiel, pero mas lento y con mas vertices
+const DECAL_ALPHA_THRESHOLD = 60; // 0-255: un pixel con menos alfa que esto cuenta como "afuera" del logo
+const DECAL_SIMPLIFY_EPS = 1.4; // en celdas de la grilla de rastreo -- limpia el "escalerita" de los bordes diagonales/curvos
+const DECAL_SIDE_DEFAULT_COLOR = 0x27314a; // gris azulado oscuro, se puede cambiar con "Color lateral" en Atributos
+
+function decalTraceMaskToLoops(mask, w, h) {
+  const at = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 0 : mask[y * w + x];
+  const outgoing = new Map(); // "x,y" -> [{x,y}, ...] (casi siempre 1 solo, 2 en un contacto diagonal)
+  const addEdge = (x1, y1, x2, y2) => {
+    const k = x1 + ',' + y1;
+    let arr = outgoing.get(k);
+    if (!arr) { arr = []; outgoing.set(k, arr); }
+    arr.push({ x: x2, y: y2 });
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!at(x, y)) continue;
+      if (!at(x - 1, y)) addEdge(x, y, x, y + 1);         // borde izquierdo de esta celda
+      if (!at(x + 1, y)) addEdge(x + 1, y + 1, x + 1, y); // borde derecho
+      if (!at(x, y - 1)) addEdge(x + 1, y, x, y);         // borde de arriba
+      if (!at(x, y + 1)) addEdge(x, y + 1, x + 1, y + 1); // borde de abajo
+    }
+  }
+  const edgeKey = (a, b) => a.x + ',' + a.y + '>' + b.x + ',' + b.y;
+  const used = new Set();
+  const loops = [];
+  for (const [startKey, edges] of outgoing) {
+    const [sx, sy] = startKey.split(',').map(Number);
+    const startPt = { x: sx, y: sy };
+    for (const e0 of edges) {
+      if (used.has(edgeKey(startPt, e0))) continue;
+      const loop = [startPt];
+      let next = e0;
+      used.add(edgeKey(startPt, next));
+      let guard = 0;
+      while (!(next.x === startPt.x && next.y === startPt.y)) {
+        loop.push(next);
+        const opts = outgoing.get(next.x + ',' + next.y) || [];
+        let chosen = null;
+        for (const cand of opts) { if (!used.has(edgeKey(next, cand))) { chosen = cand; break; } }
+        // Un "chosen" nulo (grilla mal formada) no deberia pasar nunca dado
+        // como se arman los segmentos arriba, pero cortar el loop en vez de
+        // colgarse es la salvaguarda mas simple si algun caso raro se escapa.
+        if (!chosen || ++guard > 200000) break;
+        used.add(edgeKey(next, chosen));
+        next = chosen;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+  }
+  return loops;
+}
+
+function decalPolygonArea(loop) {
+  let a = 0;
+  for (let i = 0; i < loop.length; i++) {
+    const p = loop[i], q = loop[(i + 1) % loop.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+function decalPointInPolygon(pt, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+      (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+// Agrupa los loops sueltos de decalTraceMaskToLoops en una lista de "shapes"
+// { outer, holes:[...] } -- soporta anidamiento de varios niveles (un
+// agujero con una islita solida adentro, poco comun pero posible en una
+// tipografia fantasiosa) tratando cada nivel PAR de anidamiento como un
+// contorno externo nuevo (una figura extra independiente) y cada nivel IMPAR
+// como agujero de su padre mas cercano.
+function decalClassifyLoopsIntoShapes(loops) {
+  const withMeta = loops.map(loop => ({ loop, area: Math.abs(decalPolygonArea(loop)), parent: null, depth: 0 }));
+  const byAreaAsc = [...withMeta].sort((a, b) => a.area - b.area);
+  byAreaAsc.forEach(cur => {
+    const testPt = cur.loop[0];
+    let bestParent = null;
+    byAreaAsc.forEach(cand => {
+      if (cand === cur || cand.area <= cur.area) return;
+      if (decalPointInPolygon(testPt, cand.loop) && (!bestParent || cand.area < bestParent.area)) bestParent = cand;
+    });
+    cur.parent = bestParent;
+  });
+  withMeta.forEach(n => {
+    let d = 0, cur = n, guard = 0;
+    while (cur.parent && guard++ < 1000) { d++; cur = cur.parent; }
+    n.depth = d;
+  });
+  const shapesByOuter = new Map();
+  withMeta.filter(n => n.depth % 2 === 0).forEach(n => shapesByOuter.set(n, { outer: n.loop, holes: [] }));
+  withMeta.filter(n => n.depth % 2 === 1).forEach(n => {
+    const parentShape = shapesByOuter.get(n.parent);
+    if (parentShape) parentShape.holes.push(n.loop);
+  });
+  return [...shapesByOuter.values()];
+}
+
+function decalPointLineDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+function decalDpSimplifyOpen(points, epsilon) {
+  if (points.length < 3) return points.slice();
+  let maxDist = -1, maxIdx = -1;
+  const a = points[0], b = points[points.length - 1];
+  for (let i = 1; i < points.length - 1; i++) {
+    const d = decalPointLineDist(points[i], a, b);
+    if (d > maxDist) { maxDist = d; maxIdx = i; }
+  }
+  if (maxDist <= epsilon) return [a, b];
+  const left = decalDpSimplifyOpen(points.slice(0, maxIdx + 1), epsilon);
+  const right = decalDpSimplifyOpen(points.slice(maxIdx), epsilon);
+  return left.slice(0, -1).concat(right);
+}
+// Douglas-Peucker es para una polilinea ABIERTA -- para un loop CERRADO se
+// lo corta en dos mitades (por dos puntos cualquiera, con un loop no importa
+// cuales) y se simplifica cada mitad por separado, uniendolas despues.
+function decalSimplifyClosedPolygon(loop, epsilon) {
+  if (loop.length < 6) return loop.slice();
+  const n = loop.length;
+  const splitB = Math.floor(n / 2);
+  const part1 = loop.slice(0, splitB + 1);
+  const part2 = loop.slice(splitB).concat([loop[0]]);
+  const s1 = decalDpSimplifyOpen(part1, epsilon);
+  const s2 = decalDpSimplifyOpen(part2, epsilon);
+  return s1.slice(0, -1).concat(s2.slice(0, -1));
+}
+
+// Arma la lista de THREE.Shape (con sus holes) a partir de una imagen ya
+// cargada (un <img>/ImageBitmap, como el que ya trae toda textura decodificada
+// via loadTextureFromDataUrl) -- las coordenadas quedan en un cuadrado de
+// -50..50 (el mismo tamaño base que PlaneGeometry(100,100), ver geometryFor),
+// asi el mismo mesh.scale no-uniforme que ya usa la Calcomania chata para
+// respetar la proporcion real de la imagen (ver addDecalWithFile) sigue
+// funcionando igual sin ningun caso especial.
+function buildDecalExtrudeShapes(img) {
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  if (!iw || !ih) return [];
+  const scale = Math.min(1, DECAL_TRACE_MAX_DIM / Math.max(iw, ih));
+  const tw = Math.max(1, Math.round(iw * scale));
+  const th = Math.max(1, Math.round(ih * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = tw; canvas.height = th;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, tw, th);
+  ctx.drawImage(img, 0, 0, tw, th);
+  let data;
+  try {
+    data = ctx.getImageData(0, 0, tw, th).data;
+  } catch (err) {
+    console.error('No se pudo leer el canal alfa de la imagen para extruirla:', err);
+    return [];
+  }
+  const mask = new Uint8Array(tw * th);
+  for (let i = 0; i < tw * th; i++) mask[i] = data[i * 4 + 3] >= DECAL_ALPHA_THRESHOLD ? 1 : 0;
+
+  const loops = decalTraceMaskToLoops(mask, tw, th).map(l => decalSimplifyClosedPolygon(l, DECAL_SIMPLIFY_EPS));
+  if (!loops.length) return [];
+  const shapesData = decalClassifyLoopsIntoShapes(loops);
+
+  const toShapeXY = (p) => new THREE.Vector2((p.x / tw) * 100 - 50, ((th - p.y) / th) * 100 - 50);
+  return shapesData.map(({ outer, holes }) => {
+    const shape = new THREE.Shape(outer.map(toShapeXY));
+    holes.forEach(h => shape.holes.push(new THREE.Path(h.map(toShapeXY))));
+    return shape;
+  });
+}
+
+// Prende o apaga la extrusion de una Calcomania -- 0 (o sin textura) vuelve
+// a ser el plano chato de siempre (un solo material); mayor a 0 la convierte
+// en una figura solida con dos materiales, [0] frente/atras (con la imagen)
+// y [1] lados (color solido aparte, ver "Color lateral" en Atributos). El
+// contorno trazado se cachea en entry._decalShapes (se invalida solo cuando
+// cambia la imagen, ver applyTextureToEntry/clearEntryTexture) para que
+// tocar solo la profundidad no tenga que volver a trazar cada vez.
+function applyDecalExtrusion(entry, depthMM) {
+  const mats = Array.isArray(entry.mesh.material) ? entry.mesh.material : [entry.mesh.material];
+  const front0 = mats[0];
+  if (!front0) return;
+  const snap = {
+    map: front0.map || null,
+    color: front0.color.getHex(),
+    roughness: front0.roughness,
+    metalness: front0.metalness,
+    opacity: front0.opacity,
+    wireframe: !!front0.wireframe
+  };
+  const depth = depthMM > 0 ? depthMM : 0;
+
+  let newGeo, newMat;
+  if (!depth) {
+    newGeo = new THREE.PlaneGeometry(100, 100, 1, 1);
+    newMat = new THREE.MeshStandardMaterial({
+      map: snap.map, color: snap.color, roughness: snap.roughness, metalness: snap.metalness,
+      opacity: snap.opacity, transparent: !!snap.map || snap.opacity < 1.0, wireframe: snap.wireframe,
+      side: THREE.DoubleSide
+    });
+  } else {
+    let shapes = entry._decalShapes;
+    if (!shapes) {
+      if (!snap.map || !snap.map.image) return; // sin imagen todavia (p.ej. textura restaurandose) -- se reintenta cuando la textura resuelva
+      shapes = buildDecalExtrudeShapes(snap.map.image);
+      entry._decalShapes = shapes;
+    }
+    if (!shapes.length) return; // imagen sin ningun pixel con suficiente alfa -- no hay nada que extruir
+    newGeo = new THREE.ExtrudeGeometry(shapes, { depth, bevelEnabled: false, curveSegments: 1 });
+    const front = new THREE.MeshStandardMaterial({
+      map: snap.map, color: snap.color, roughness: snap.roughness, metalness: snap.metalness,
+      opacity: snap.opacity, transparent: snap.opacity < 1.0, wireframe: snap.wireframe,
+      side: THREE.FrontSide
+    });
+    const side = new THREE.MeshStandardMaterial({
+      color: entry.decalSideColor != null ? entry.decalSideColor : DECAL_SIDE_DEFAULT_COLOR,
+      roughness: snap.roughness, metalness: snap.metalness,
+      opacity: snap.opacity, transparent: snap.opacity < 1.0, wireframe: snap.wireframe,
+      side: THREE.FrontSide
+    });
+    newMat = [front, side];
+  }
+
+  const oldGeo = entry.mesh.geometry;
+  entry.mesh.geometry = newGeo;
+  entry.mesh.material = newMat;
+  entry.decalExtrusion = depth;
+  oldGeo.dispose();
+  mats.forEach(m => m.dispose());
 }
 
 // La Calcomania pide el PNG de una (ver el manejador de decalFileInput) y
@@ -801,7 +1095,8 @@ async function addDecalWithFile(file) {
   sceneObjects.set(id, {
     id, kind: 'decal', mesh: built.node, pickMesh: built.pickMesh, visible: true, parentId: null,
     sculpted: false, name: null, collapsed: false,
-    textureDataUrl: loaded.dataUrl, textureAspect: aspect
+    textureDataUrl: loaded.dataUrl, textureAspect: aspect,
+    decalExtrusion: 0, decalSideColor: null
   });
   renderLayerList();
   selectObject(id);
@@ -969,7 +1264,9 @@ function rebuildTextGeometry(entry) {
 function disposeEntry(entry) {
   entry.mesh.traverse(obj => {
     if (obj.geometry) obj.geometry.dispose();
-    if (obj.material) obj.material.dispose();
+    // Una Calcomania extruida tiene un ARRAY de 2 materiales (ver
+    // applyDecalExtrusion) en vez de uno solo.
+    if (obj.material) (Array.isArray(obj.material) ? obj.material : [obj.material]).forEach(m => m.dispose());
   });
 }
 
@@ -1206,7 +1503,19 @@ function toggleVisible(id) {
 function setColor(id, hex) {
   const entry = sceneObjects.get(id);
   if (!entry || !entry.mesh.material) return;
-  entry.mesh.material.color.set(hex);
+  // En una Calcomania extruida, "Color Base" tiñe el FRENTE (donde va la
+  // imagen) -- el color de los LADOS es aparte, ver "Color lateral" y
+  // setDecalSideColor mas abajo.
+  const mat = getFrontMaterial(entry);
+  if (mat) mat.color.set(hex);
+}
+
+function setDecalSideColor(id, hex) {
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+  entry.decalSideColor = new THREE.Color(hex).getHex();
+  const side = getSideMaterial(entry);
+  if (side) side.color.set(hex);
 }
 
 const noSelectionMsg = document.getElementById('noSelectionMsg');
@@ -1233,6 +1542,10 @@ const lightShadowCheck = document.getElementById('lightShadowCheck');
 const materialTextureInput = document.getElementById('materialTextureInput');
 const materialTextureInfoRow = document.getElementById('materialTextureInfoRow');
 const materialTextureClearBtn = document.getElementById('materialTextureClearBtn');
+const propsDecalExtrudeRow = document.getElementById('propsDecalExtrudeRow');
+const propsDecalExtrusion = document.getElementById('propsDecalExtrusion');
+const propsDecalSideColorRow = document.getElementById('propsDecalSideColorRow');
+const propsDecalSideColor = document.getElementById('propsDecalSideColor');
 
 // Transform inputs
 const posX = document.getElementById('posX');
@@ -1385,14 +1698,30 @@ function selectObject(id) {
     // Material properties
     if (entry.mesh.material) {
       if (matSection) matSection.style.display = 'block';
-      propsColor.value = '#' + entry.mesh.material.color.getHexString();
-      propsRoughness.value = entry.mesh.material.roughness != null ? entry.mesh.material.roughness : 0.5;
-      propsMetalness.value = entry.mesh.material.metalness != null ? entry.mesh.material.metalness : 0.05;
-      propsOpacity.value = entry.mesh.material.opacity != null ? entry.mesh.material.opacity : 1.0;
-      propsWireframe.checked = !!entry.mesh.material.wireframe;
+      const frontMat = getFrontMaterial(entry);
+      propsColor.value = '#' + frontMat.color.getHexString();
+      propsRoughness.value = frontMat.roughness != null ? frontMat.roughness : 0.5;
+      propsMetalness.value = frontMat.metalness != null ? frontMat.metalness : 0.05;
+      propsOpacity.value = frontMat.opacity != null ? frontMat.opacity : 1.0;
+      propsWireframe.checked = !!frontMat.wireframe;
       if (materialTextureInfoRow) materialTextureInfoRow.style.display = entry.textureDataUrl ? 'block' : 'none';
     } else {
       if (matSection) matSection.style.display = 'none';
+    }
+
+    // "Extrusion" de Calcomania -- convertir el plano con la imagen en una
+    // figura 3D solida con la silueta exacta del logo (ver
+    // applyDecalExtrusion). Solo tiene sentido para kind:'decal'.
+    if (propsDecalExtrudeRow) {
+      const isDecal = entry.kind === 'decal';
+      propsDecalExtrudeRow.style.display = isDecal ? 'block' : 'none';
+      if (isDecal) {
+        propsDecalExtrusion.value = entry.decalExtrusion || 0;
+        const sideMat = getSideMaterial(entry);
+        const sideHex = sideMat ? sideMat.color.getHex() : (entry.decalSideColor != null ? entry.decalSideColor : DECAL_SIDE_DEFAULT_COLOR);
+        propsDecalSideColor.value = '#' + new THREE.Color(sideHex).getHexString();
+        if (propsDecalSideColorRow) propsDecalSideColorRow.style.display = entry.decalExtrusion ? 'block' : 'none';
+      }
     }
 
     // Propiedades de Luz (Puntual/Foco) -- no tienen material (mesh.material
@@ -1454,6 +1783,12 @@ function selectObject(id) {
         const clonerLinearRow = document.getElementById('clonerLinearRow');
         const clonerCircularRow = document.getElementById('clonerCircularRow');
         const clonerGridRow = document.getElementById('clonerGridRow');
+        const clonerGridXInput = document.getElementById('clonerGridXInput');
+        const clonerGridYInput = document.getElementById('clonerGridYInput');
+        const clonerGridZInput = document.getElementById('clonerGridZInput');
+        const clonerGridSepXInput = document.getElementById('clonerGridSepXInput');
+        const clonerGridSepYInput = document.getElementById('clonerGridSepYInput');
+        const clonerGridSepZInput = document.getElementById('clonerGridSepZInput');
         const clonerGridRotInput = document.getElementById('clonerGridRotInput');
         const clonerGridRotVal = document.getElementById('clonerGridRotVal');
         const clonerGridRotAxisSelect = document.getElementById('clonerGridRotAxisSelect');
@@ -1472,6 +1807,19 @@ function selectObject(id) {
         // este campo guardado, se muestra el mismo eje del circulo (el
         // comportamiento de siempre) en vez de forzar "Y".
         if (clonerRotAxisSelect) clonerRotAxisSelect.value = clonerEntry.clonerRotAxis || clonerEntry.clonerAxis || 'y';
+        // Cuadricula: hasta ahora estos 6 campos (filas/cols/pisos y su
+        // separacion propia) solo se podian fijar UNA vez, en el modal de
+        // creacion -- quedaba anotado en "Pendiente" que no habia forma de
+        // tocarlos despues desde Atributos, a diferencia de Lineal/Circular.
+        // `updateClonerLive()` ya sabia leer `gridX/gridY/gridZ`/`sepX/sepY/sepZ`
+        // (los mismos 3 campos de separacion que usa Lineal) para reconstruir
+        // la grilla -- solo faltaba esta UI para poder cambiarlos en vivo.
+        if (clonerGridXInput) clonerGridXInput.value = clonerEntry.gridX != null ? clonerEntry.gridX : 3;
+        if (clonerGridYInput) clonerGridYInput.value = clonerEntry.gridY != null ? clonerEntry.gridY : 1;
+        if (clonerGridZInput) clonerGridZInput.value = clonerEntry.gridZ != null ? clonerEntry.gridZ : 3;
+        if (clonerGridSepXInput) clonerGridSepXInput.value = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
+        if (clonerGridSepYInput) clonerGridSepYInput.value = clonerEntry.sepY != null ? clonerEntry.sepY : 80;
+        if (clonerGridSepZInput) clonerGridSepZInput.value = clonerEntry.sepZ != null ? clonerEntry.sepZ : 80;
         if (clonerGridRotInput) clonerGridRotInput.value = clonerEntry.gridRotDeg || 0;
         if (clonerGridRotVal) clonerGridRotVal.textContent = clonerEntry.gridRotDeg || 0;
         if (clonerGridRotAxisSelect) clonerGridRotAxisSelect.value = clonerEntry.gridRotAxis || 'y';
@@ -1675,7 +2023,7 @@ propsColor.addEventListener('change', () => { pushHistory(); });
 propsRoughness.addEventListener('input', () => {
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
-    if (entry && entry.mesh.material) entry.mesh.material.roughness = parseFloat(propsRoughness.value);
+    if (entry && entry.mesh.material) forEachMaterial(entry, m => { m.roughness = parseFloat(propsRoughness.value); });
   }
 });
 propsRoughness.addEventListener('change', () => { pushHistory(); });
@@ -1683,7 +2031,7 @@ propsRoughness.addEventListener('change', () => { pushHistory(); });
 propsMetalness.addEventListener('input', () => {
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
-    if (entry && entry.mesh.material) entry.mesh.material.metalness = parseFloat(propsMetalness.value);
+    if (entry && entry.mesh.material) forEachMaterial(entry, m => { m.metalness = parseFloat(propsMetalness.value); });
   }
 });
 propsMetalness.addEventListener('change', () => { pushHistory(); });
@@ -1693,18 +2041,20 @@ propsOpacity.addEventListener('input', () => {
     const entry = sceneObjects.get(selectedId);
     if (entry && entry.mesh) {
       const val = parseFloat(propsOpacity.value);
-      // Si hay una textura cargada, "transparent" queda SIEMPRE prendido
-      // (el canal alpha del PNG puede necesitarlo aunque la Opacidad este
-      // en 1.0) -- de lo contrario, subir la Opacidad de vuelta a 1.0
-      // apagaria "transparent" y el fondo del PNG dejaria de recortarse.
-      const hasTexture = !!entry.textureDataUrl;
       entry.mesh.traverse(child => {
-        if (child.material) {
-          child.material.opacity = val;
-          child.material.transparent = hasTexture || val < 1.0;
-          child.material.depthWrite = true;
-          child.material.needsUpdate = true;
-        }
+        if (!child.material) return;
+        (Array.isArray(child.material) ? child.material : [child.material]).forEach(mat => {
+          mat.opacity = val;
+          // Si el material tiene una textura con alpha, "transparent" queda
+          // SIEMPRE prendido (el canal alpha del PNG puede necesitarlo
+          // aunque la Opacidad este en 1.0) -- de lo contrario, subir la
+          // Opacidad de vuelta a 1.0 apagaria "transparent" y el fondo del
+          // PNG dejaria de recortarse. Un material sin mapa (p.ej. los
+          // LADOS de una Calcomania extruida) solo depende de la Opacidad.
+          mat.transparent = !!mat.map || val < 1.0;
+          mat.depthWrite = true;
+          mat.needsUpdate = true;
+        });
       });
     }
   }
@@ -1715,7 +2065,7 @@ propsWireframe.addEventListener('change', () => {
   if (selectedId != null) {
     const entry = sceneObjects.get(selectedId);
     if (entry && entry.mesh.material) {
-      entry.mesh.material.wireframe = propsWireframe.checked;
+      forEachMaterial(entry, m => { m.wireframe = propsWireframe.checked; });
       pushHistory();
     }
   }
@@ -1749,6 +2099,26 @@ if (materialTextureClearBtn) {
     if (materialTextureInfoRow) materialTextureInfoRow.style.display = 'none';
     pushHistory();
   });
+}
+
+// --- Extrusion de Calcomania (ver applyDecalExtrusion mas arriba) ---
+if (propsDecalExtrusion) {
+  propsDecalExtrusion.addEventListener('input', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || entry.kind !== 'decal') return;
+    const depth = Math.max(0, parseFloat(propsDecalExtrusion.value) || 0);
+    applyDecalExtrusion(entry, depth);
+    if (propsDecalSideColorRow) propsDecalSideColorRow.style.display = depth ? 'block' : 'none';
+    updateHandles(entry.id);
+  });
+  propsDecalExtrusion.addEventListener('change', () => { pushHistory(); });
+}
+if (propsDecalSideColor) {
+  propsDecalSideColor.addEventListener('input', () => {
+    if (selectedId != null) setDecalSideColor(selectedId, propsDecalSideColor.value);
+  });
+  propsDecalSideColor.addEventListener('change', () => { pushHistory(); });
 }
 
 // --- Propiedades de Luz (Puntual/Foco) en vivo ---
@@ -2921,19 +3291,25 @@ function syncClonerChildrenLive(clonerEntry) {
   // La escala y el material nunca tienen un offset distinto por copia
   // (cloneEntryAt siempre copia el material y la escala tal cual del
   // original al crear), asi que un copiado directo cada cuadro es exacto
-  // y mas simple que llevar otra diferencia acumulada.
-  const srcMat = src.mesh.material;
+  // y mas simple que llevar otra diferencia acumulada. Una Calcomania
+  // extruida tiene DOS materiales (frente y lados, ver applyDecalExtrusion)
+  // en vez de uno solo -- se emparejan por indice (front<->front,
+  // side<->side) para que cada uno mantenga su PROPIO color.
+  const srcMats = src.mesh.material ? (Array.isArray(src.mesh.material) ? src.mesh.material : [src.mesh.material]) : [];
   clonerEntry.clonerChildIds.forEach(cid => {
     const c = sceneObjects.get(cid);
     if (!c) return;
     c.mesh.scale.copy(src.mesh.scale);
-    if (srcMat && c.mesh.material) {
-      c.mesh.material.color.copy(srcMat.color);
-      c.mesh.material.roughness = srcMat.roughness;
-      c.mesh.material.metalness = srcMat.metalness;
-      c.mesh.material.opacity = srcMat.opacity;
-      c.mesh.material.transparent = !!srcMat.map || srcMat.opacity < 1.0;
-      c.mesh.material.wireframe = srcMat.wireframe;
+    if (!srcMats.length || !c.mesh.material) return;
+    const dstMats = Array.isArray(c.mesh.material) ? c.mesh.material : [c.mesh.material];
+    for (let i = 0; i < srcMats.length && i < dstMats.length; i++) {
+      const sm = srcMats[i], dm = dstMats[i];
+      dm.color.copy(sm.color);
+      dm.roughness = sm.roughness;
+      dm.metalness = sm.metalness;
+      dm.opacity = sm.opacity;
+      dm.transparent = !!sm.map || sm.opacity < 1.0;
+      dm.wireframe = sm.wireframe;
     }
   });
 }
@@ -2960,6 +3336,12 @@ const clonerRadiusInput = document.getElementById('clonerRadiusInput');
 const clonerRadiusVal = document.getElementById('clonerRadiusVal');
 const clonerRotCheck = document.getElementById('clonerRotCheck');
 const clonerRotAxisSelect = document.getElementById('clonerRotAxisSelect');
+const clonerGridXInput = document.getElementById('clonerGridXInput');
+const clonerGridYInput = document.getElementById('clonerGridYInput');
+const clonerGridZInput = document.getElementById('clonerGridZInput');
+const clonerGridSepXInput = document.getElementById('clonerGridSepXInput');
+const clonerGridSepYInput = document.getElementById('clonerGridSepYInput');
+const clonerGridSepZInput = document.getElementById('clonerGridSepZInput');
 const clonerGridRotInput = document.getElementById('clonerGridRotInput');
 const clonerGridRotVal = document.getElementById('clonerGridRotVal');
 const clonerGridRotAxisSelect = document.getElementById('clonerGridRotAxisSelect');
@@ -2976,10 +3358,50 @@ if (clonerModeSelect) {
     if (clonerLinearRow) clonerLinearRow.style.display = cloner.clonerMode === 'linear' ? 'flex' : 'none';
     if (clonerCircularRow) clonerCircularRow.style.display = cloner.clonerMode === 'circular' ? 'flex' : 'none';
     if (clonerGridRow) clonerGridRow.style.display = cloner.clonerMode === 'grid' ? 'flex' : 'none';
+    // Al pasar a Cuadricula desde otro modo, refresca los campos propios de
+    // grilla con lo que ya tenga guardado el cloner (o el default de
+    // siempre) -- si no se refrescan aca, quedaban mostrando lo que hubiera
+    // en el HTML desde la ultima vez que se abrio este panel.
+    if (cloner.clonerMode === 'grid') {
+      if (clonerGridXInput) clonerGridXInput.value = cloner.gridX != null ? cloner.gridX : 3;
+      if (clonerGridYInput) clonerGridYInput.value = cloner.gridY != null ? cloner.gridY : 1;
+      if (clonerGridZInput) clonerGridZInput.value = cloner.gridZ != null ? cloner.gridZ : 3;
+      if (clonerGridSepXInput) clonerGridSepXInput.value = cloner.sepX != null ? cloner.sepX : 80;
+      if (clonerGridSepYInput) clonerGridSepYInput.value = cloner.sepY != null ? cloner.sepY : 80;
+      if (clonerGridSepZInput) clonerGridSepZInput.value = cloner.sepZ != null ? cloner.sepZ : 80;
+    }
     updateClonerLive(cloner);
     pushHistory();
   });
 }
+
+// Cuadricula: filas/columnas/pisos propios (gridX/Y/Z) y su separacion
+// (sepX/Y/Z, los mismos 3 campos que ya usa Lineal -- updateClonerLive() ya
+// sabia leerlos para la grilla, solo faltaba poder tocarlos desde aca).
+[clonerGridXInput, clonerGridYInput, clonerGridZInput].forEach((inp, idx) => {
+  if (!inp) return;
+  const keys = ['gridX', 'gridY', 'gridZ'];
+  const mins = [1, 1, 1];
+  inp.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner[keys[idx]] = Math.max(mins[idx], parseInt(inp.value) || mins[idx]);
+    updateClonerLive(cloner);
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+[clonerGridSepXInput, clonerGridSepYInput, clonerGridSepZInput].forEach((inp, idx) => {
+  if (!inp) return;
+  const keys = ['sepX', 'sepY', 'sepZ'];
+  inp.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner[keys[idx]] = parseFloat(inp.value) || 0;
+    updateClonerLive(cloner);
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
 
 if (clonerCountInput) {
   clonerCountInput.addEventListener('input', () => {
@@ -3568,13 +3990,18 @@ function snapshotEntry(e) {
       px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
       rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
       sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
-      color: e.mesh.material ? e.mesh.material.color.getHex() : null,
-      roughness: e.mesh.material ? e.mesh.material.roughness : null,
-      metalness: e.mesh.material ? e.mesh.material.metalness : null,
-      opacity: e.mesh.material ? e.mesh.material.opacity : null,
-      wireframe: e.mesh.material ? !!e.mesh.material.wireframe : null,
+      // getFrontMaterial: si es una Calcomania extruida (array [frente,
+      // lados], ver applyDecalExtrusion) esto lee SIEMPRE el material de
+      // frente -- el color de los lados se guarda aparte, en decalSideColor.
+      color: e.mesh.material ? getFrontMaterial(e).color.getHex() : null,
+      roughness: e.mesh.material ? getFrontMaterial(e).roughness : null,
+      metalness: e.mesh.material ? getFrontMaterial(e).metalness : null,
+      opacity: e.mesh.material ? getFrontMaterial(e).opacity : null,
+      wireframe: e.mesh.material ? !!getFrontMaterial(e).wireframe : null,
       textureDataUrl: e.textureDataUrl || null,
       textureAspect: e.textureAspect || null,
+      decalExtrusion: e.decalExtrusion || null,
+      decalSideColor: e.decalSideColor != null ? e.decalSideColor : null,
       clonerMode: e.clonerMode || null,
       clonerCount: e.clonerCount != null ? e.clonerCount : null,
       clonerSourceId: e.clonerSourceId != null ? e.clonerSourceId : null,
@@ -3694,17 +4121,14 @@ function buildEntryFromSnapshot(s) {
   // material armado. Igual que sculptPositions arriba, se aplica ENCIMA del
   // material recien creado; hasta que resuelva, la figura se ve con su
   // color solido nomas (aparece la imagen un instante despues, imperceptible).
-  if (s.textureDataUrl && built.node.material) {
-    loadTextureFromDataUrl(s.textureDataUrl).then(tex => {
-      applyTextureToMaterial(built.node.material, tex);
-    }).catch(err => console.error('No se pudo restaurar una textura guardada:', err));
-  }
-  return {
+  const entry = {
     id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
     visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
     sculpted, name: s.name || null, collapsed: !!s.collapsed,
     textureDataUrl: s.textureDataUrl || null,
     textureAspect: s.textureAspect || null,
+    decalExtrusion: s.decalExtrusion || null,
+    decalSideColor: s.decalSideColor != null ? s.decalSideColor : null,
     clonerMode: s.clonerMode || null,
     clonerCount: s.clonerCount != null ? s.clonerCount : null,
     clonerSourceId: s.clonerSourceId != null ? s.clonerSourceId : null,
@@ -3755,6 +4179,23 @@ function buildEntryFromSnapshot(s) {
     textReverseDirection: !!s.textReverseDirection,
     textTiltDeg: s.textTiltDeg != null ? s.textTiltDeg : undefined
   };
+  // La textura se restaura de forma ASINCRONICA (decodificar un dataURL pasa
+  // por un <img>/onload, aunque sea practicamente instantaneo al ser local)
+  // -- por eso no puede ir en "extraOpts" como el resto de las propiedades
+  // del material: buildObject() es sincronico y ya devolvio el material
+  // armado. Igual que sculptPositions arriba, se aplica ENCIMA del material
+  // recien creado; hasta que resuelva, la figura se ve con su color solido
+  // nomas (aparece la imagen un instante despues, imperceptible). Si ademas
+  // esta Calcomania tenia Extrusion puesta, recien ahi (con la imagen ya
+  // decodificada, ver getFrontMaterial/applyDecalExtrusion mas arriba) se
+  // puede volver a trazar su contorno y reconstruir la figura solida.
+  if (s.textureDataUrl && built.node.material) {
+    loadTextureFromDataUrl(s.textureDataUrl).then(tex => {
+      applyTextureToMaterial(getFrontMaterial(entry), tex);
+      if (entry.decalExtrusion) applyDecalExtrusion(entry, entry.decalExtrusion);
+    }).catch(err => console.error('No se pudo restaurar una textura guardada:', err));
+  }
+  return entry;
 }
 
 function rebuildSceneFrom(snap) {
@@ -3916,6 +4357,30 @@ function mirrorEntrySubtreeInPlace(rootId) {
           idxArr[t + 2] = tmp;
         }
         geo.index.needsUpdate = true;
+      } else {
+        // Sin indice (ExtrudeGeometry/TextGeometry -- Texto 3D, el generador
+        // "Extrusion" de un perfil, y ahora tambien una Calcomania extruida,
+        // ver applyDecalExtrusion mas arriba: cada triangulo son 3 vertices
+        // SUELTOS, sin compartir con otros triangulos) -- invertir el
+        // sentido de giro aca significa cambiar de lugar los vertices 2 y 3
+        // de CADA triangulo en TODOS los atributos a la vez (no solo
+        // posicion, que ya se espejo en X arriba), para que uv/normal sigan
+        // correspondiendose con la posicion que les toca. Sin este intercambio,
+        // una figura solida espejada (Simetria) quedaba con las normales
+        // mirando para adentro -- invisible o con la iluminacion invertida.
+        Object.keys(geo.attributes).forEach(name => {
+          const attr = geo.attributes[name];
+          const itemSize = attr.itemSize;
+          const arr = attr.array;
+          const tmp = new arr.constructor(itemSize);
+          for (let t = 0; t < attr.count; t += 3) {
+            const i1 = (t + 1) * itemSize, i2 = (t + 2) * itemSize;
+            for (let k = 0; k < itemSize; k++) tmp[k] = arr[i1 + k];
+            for (let k = 0; k < itemSize; k++) arr[i1 + k] = arr[i2 + k];
+            for (let k = 0; k < itemSize; k++) arr[i2 + k] = tmp[k];
+          }
+          attr.needsUpdate = true;
+        });
       }
       posAttr.needsUpdate = true;
       geo.computeVertexNormals();
@@ -4138,22 +4603,27 @@ function exportToOBJ() {
       }
     }
 
-    if (indexAttr) {
-      const arr = indexAttr.array;
-      for (let i = 0; i < arr.length; i += 3) {
-        const v1 = arr[i] + vertexOffset;
-        const v2 = arr[i + 1] + vertexOffset;
-        const v3 = arr[i + 2] + vertexOffset;
-        if (normAttr && uvAttr) {
-          const n1 = arr[i] + normalOffset, n2 = arr[i + 1] + normalOffset, n3 = arr[i + 2] + normalOffset;
-          const t1 = arr[i] + uvOffset, t2 = arr[i + 1] + uvOffset, t3 = arr[i + 2] + uvOffset;
-          output += `f ${v1}/${t1}/${n1} ${v2}/${t2}/${n2} ${v3}/${t3}/${n3}\n`;
-        } else if (normAttr) {
-          const n1 = arr[i] + normalOffset, n2 = arr[i + 1] + normalOffset, n3 = arr[i + 2] + normalOffset;
-          output += `f ${v1}//${n1} ${v2}//${n2} ${v3}//${n3}\n`;
-        } else {
-          output += `f ${v1} ${v2} ${v3}\n`;
-        }
+    // ExtrudeGeometry (Texto 3D, el generador "Extrusion" de un perfil, y
+    // ahora tambien una Calcomania extruida, ver applyDecalExtrusion mas
+    // arriba) no trae indice -- cada 3 vertices SEGUIDOS ya son un triangulo
+    // completo, sin compartir nada con el siguiente. Sin este caso, antes se
+    // exportaban los vertices pero NINGUNA cara para esas figuras (serían
+    // invisibles al abrir el .obj en otro programa/la laminadora 3D).
+    const faceCount = indexAttr ? indexAttr.array.length : posAttr.count;
+    const idx = indexAttr ? (i) => indexAttr.array[i] : (i) => i;
+    for (let i = 0; i < faceCount; i += 3) {
+      const v1 = idx(i) + vertexOffset;
+      const v2 = idx(i + 1) + vertexOffset;
+      const v3 = idx(i + 2) + vertexOffset;
+      if (normAttr && uvAttr) {
+        const n1 = idx(i) + normalOffset, n2 = idx(i + 1) + normalOffset, n3 = idx(i + 2) + normalOffset;
+        const t1 = idx(i) + uvOffset, t2 = idx(i + 1) + uvOffset, t3 = idx(i + 2) + uvOffset;
+        output += `f ${v1}/${t1}/${n1} ${v2}/${t2}/${n2} ${v3}/${t3}/${n3}\n`;
+      } else if (normAttr) {
+        const n1 = idx(i) + normalOffset, n2 = idx(i + 1) + normalOffset, n3 = idx(i + 2) + normalOffset;
+        output += `f ${v1}//${n1} ${v2}//${n2} ${v3}//${n3}\n`;
+      } else {
+        output += `f ${v1} ${v2} ${v3}\n`;
       }
     }
 
@@ -6130,13 +6600,23 @@ function animate() {
       srcEntry.mesh.scale.z
     );
     if (srcEntry.mesh.material && entry.mesh.material) {
-      entry.mesh.material.opacity = srcEntry.mesh.material.opacity;
-      entry.mesh.material.transparent = !!srcEntry.mesh.material.map || srcEntry.mesh.material.opacity < 1.0;
-      entry.mesh.material.side = THREE.DoubleSide;
-      entry.mesh.material.color.copy(srcEntry.mesh.material.color);
-      entry.mesh.material.roughness = srcEntry.mesh.material.roughness;
-      entry.mesh.material.metalness = srcEntry.mesh.material.metalness;
-      entry.mesh.material.wireframe = srcEntry.mesh.material.wireframe;
+      // Una Calcomania extruida tiene DOS materiales (frente y lados, ver
+      // applyDecalExtrusion) -- se emparejan por indice para que cada uno
+      // mantenga su PROPIO color (el "DoubleSide" de siempre solo aplica al
+      // caso de un solo material: una figura solida ya tiene sus dos caras
+      // reales, forzar DoubleSide ahi no hace falta).
+      const srcMats = Array.isArray(srcEntry.mesh.material) ? srcEntry.mesh.material : [srcEntry.mesh.material];
+      const dstMats = Array.isArray(entry.mesh.material) ? entry.mesh.material : [entry.mesh.material];
+      if (!Array.isArray(entry.mesh.material)) entry.mesh.material.side = THREE.DoubleSide;
+      for (let i = 0; i < srcMats.length && i < dstMats.length; i++) {
+        const sm = srcMats[i], dm = dstMats[i];
+        dm.opacity = sm.opacity;
+        dm.transparent = !!sm.map || sm.opacity < 1.0;
+        dm.color.copy(sm.color);
+        dm.roughness = sm.roughness;
+        dm.metalness = sm.metalness;
+        dm.wireframe = sm.wireframe;
+      }
     }
   });
 
@@ -6519,12 +6999,17 @@ window.addEventListener('keyup', e => {
 });
 
 function cloneEntryByEntry(src) {
-  const colorHex = src.mesh.material ? src.mesh.material.color.getHex() : undefined;
+  // Nota: igual que ya pasaba con la textura de una Calcomania (limitacion
+  // conocida, ver "Pendiente"), Alt+arrastrar para duplicar tampoco conserva
+  // la Extrusion -- usa solo "la" materia (frente, si es un array) para no
+  // romper con .color.getHex() sobre un array.
+  const srcMat = src.mesh.material ? getFrontMaterial(src) : null;
+  const colorHex = srcMat ? srcMat.color.getHex() : undefined;
   const opts = {
-    roughness: src.mesh.material ? src.mesh.material.roughness : undefined,
-    metalness: src.mesh.material ? src.mesh.material.metalness : undefined,
-    opacity:   src.mesh.material ? src.mesh.material.opacity   : undefined,
-    wireframe: src.mesh.material ? src.mesh.material.wireframe : undefined,
+    roughness: srcMat ? srcMat.roughness : undefined,
+    metalness: srcMat ? srcMat.metalness : undefined,
+    opacity:   srcMat ? srcMat.opacity   : undefined,
+    wireframe: srcMat ? srcMat.wireframe : undefined,
   };
   if (isCustomGeomKind(src.kind)) opts.geometryData = serializeGeometry(src.mesh.geometry);
   const built = buildObject(src.kind, colorHex, opts);
@@ -6620,46 +7105,14 @@ if (partsListCopyBtn) {
 // =====================================================================
 // FEATURE 5: EXPORTAR OBJ
 // =====================================================================
-const exportObjBtnEl = document.getElementById('exportObjBtn');
-if (exportObjBtnEl) exportObjBtnEl.addEventListener('click', exportSceneAsOBJ);
+// Nota (sept. 2026): aca vivia una SEGUNDA funcion de exportar a OBJ
+// (exportSceneAsOBJ) enganchada al MISMO boton "exportObjBtn" que ya usa
+// exportToOBJ() (mas arriba en el archivo) -- restos de un refactor viejo
+// que nunca se limpiaron. El boton tenia DOS listeners a la vez: cada click
+// en "Exportar 3D (.OBJ)" descargaba DOS archivos .obj (uno de cada
+// funcion). Se saca esta copia duplicada -- exportToOBJ ya hace lo mismo
+// (y de yapa exporta tambien las coordenadas UV, que esta no traia) y ya
+// quedo arreglada para geometrias SIN indice (Texto 3D, el generador
+// "Extrusion", y ahora tambien una Calcomania extruida) al mismo tiempo
+// que esta duplicada, asi que no se perdia ningun arreglo al sacarla.
 
-function exportSceneAsOBJ() {
-  let objStr = '# Exportado desde 3DPro\n\n';
-  let vOffset = 1;
-  sceneObjects.forEach(entry => {
-    if (!entry.visible || entry.kind === 'null' || isLightKind(entry.kind) || entry.kind === 'hair' || entry.kind === 'spline') return;
-    if (!entry.mesh.geometry) return;
-    const objName = (entry.name || KIND_LABEL[entry.kind] || entry.kind).replace(/\s+/g, '_');
-    objStr += `o ${objName}\n`;
-    const geo = entry.mesh.geometry.clone();
-    geo.applyMatrix4(entry.mesh.matrixWorld);
-    const pos = geo.attributes.position;
-    const nrm = geo.attributes.normal;
-    if (!pos) { geo.dispose(); return; }
-    for (let i = 0; i < pos.count; i++)
-      objStr += `v ${pos.getX(i).toFixed(3)} ${pos.getY(i).toFixed(3)} ${pos.getZ(i).toFixed(3)}\n`;
-    if (nrm)
-      for (let i = 0; i < nrm.count; i++)
-        objStr += `vn ${nrm.getX(i).toFixed(4)} ${nrm.getY(i).toFixed(4)} ${nrm.getZ(i).toFixed(4)}\n`;
-    if (geo.index) {
-      const idx = geo.index;
-      for (let i = 0; i < idx.count; i += 3) {
-        const a = idx.getX(i)+vOffset, b = idx.getX(i+1)+vOffset, c = idx.getX(i+2)+vOffset;
-        objStr += nrm ? `f ${a}//${a} ${b}//${b} ${c}//${c}\n` : `f ${a} ${b} ${c}\n`;
-      }
-    } else {
-      for (let i = 0; i < pos.count; i += 3) {
-        const a = i+vOffset, b = i+1+vOffset, c = i+2+vOffset;
-        objStr += nrm ? `f ${a}//${a} ${b}//${b} ${c}//${c}\n` : `f ${a} ${b} ${c}\n`;
-      }
-    }
-    vOffset += pos.count;
-    objStr += '\n';
-    geo.dispose();
-  });
-  const blob = new Blob([objStr], { type: 'text/plain' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = '3DPro_escena.obj';
-  a.click(); URL.revokeObjectURL(url);
-}
