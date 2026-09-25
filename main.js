@@ -11,6 +11,31 @@ import { FontLoader } from './vendor/three-addons/loaders/FontLoader.js';
 import { TextGeometry } from './vendor/three-addons/geometries/TextGeometry.js';
 import { HDRLoader } from './vendor/three-addons/loaders/HDRLoader.js';
 
+// --- Notificaciones tipo "toast" (reemplazan los alert() nativos) ---
+// Los alert() del navegador bloquean TODO el hilo (incluida la animacion
+// 3D) hasta que el usuario aprieta OK -- en una tablet, con las manos
+// ocupadas sobre la mesa de trabajo, un dialogo del sistema que hay que
+// cerrar con un toque extra molesta mas que un aviso chico que aparece
+// arriba, se lee, y se cierra solo. Inspirado en el sistema de
+// notificaciones del proyecto de referencia Cinema 4D Web que compartio
+// Andres (ver "showNotification" en su App.tsx), reimplementado en CSS/JS
+// propio (sin React) -- ver contenedor #toastContainer y estilos .toast en
+// index.html.
+const toastContainer = document.getElementById('toastContainer');
+function showToast(message, type = 'info') {
+  if (!toastContainer) { alert(message); return; } // resguardo si el HTML no tiene el contenedor
+  const toast = document.createElement('div');
+  toast.className = 'toast toast-' + type;
+  toast.textContent = message;
+  toastContainer.appendChild(toast);
+  const remove = () => {
+    toast.classList.add('toast-out');
+    setTimeout(() => toast.remove(), 200);
+  };
+  toast.addEventListener('click', remove); // se puede cerrar antes tocandolo
+  setTimeout(remove, 4200);
+}
+
 const wrap = document.getElementById('canvasWrap');
 const layerList = document.getElementById('layerList');
 const layerEmpty = document.getElementById('layerEmpty');
@@ -1076,7 +1101,7 @@ async function addDecalWithFile(file) {
     loaded = await loadTextureFromFile(file);
   } catch (err) {
     console.error('No se pudo cargar la imagen de la calcomania:', err);
-    alert('No se pudo cargar esa imagen. ¿Es un PNG válido?');
+    showToast('No se pudo cargar esa imagen. ¿Es un PNG válido?', 'error');
     return;
   }
   const built = buildObject('decal');
@@ -1824,6 +1849,20 @@ function selectObject(id) {
         if (clonerGridRotVal) clonerGridRotVal.textContent = clonerEntry.gridRotDeg || 0;
         if (clonerGridRotAxisSelect) clonerGridRotAxisSelect.value = clonerEntry.gridRotAxis || 'y';
 
+        // Efector Aleatorio: valores actuales del clonador seleccionado.
+        const clonerRandomPosInput = document.getElementById('clonerRandomPosInput');
+        const clonerRandomPosVal = document.getElementById('clonerRandomPosVal');
+        const clonerRandomRotInput = document.getElementById('clonerRandomRotInput');
+        const clonerRandomRotVal = document.getElementById('clonerRandomRotVal');
+        const clonerRandomScaleInput = document.getElementById('clonerRandomScaleInput');
+        const clonerRandomScaleVal = document.getElementById('clonerRandomScaleVal');
+        if (clonerRandomPosInput) clonerRandomPosInput.value = clonerEntry.randomPos || 0;
+        if (clonerRandomPosVal) clonerRandomPosVal.textContent = clonerEntry.randomPos || 0;
+        if (clonerRandomRotInput) clonerRandomRotInput.value = clonerEntry.randomRot || 0;
+        if (clonerRandomRotVal) clonerRandomRotVal.textContent = clonerEntry.randomRot || 0;
+        if (clonerRandomScaleInput) clonerRandomScaleInput.value = clonerEntry.randomScale || 0;
+        if (clonerRandomScaleVal) clonerRandomScaleVal.textContent = clonerEntry.randomScale || 0;
+
         const modeNow = clonerEntry.clonerMode || 'linear';
         if (clonerLinearRow) clonerLinearRow.style.display = modeNow === 'linear' ? 'flex' : 'none';
         if (clonerCircularRow) clonerCircularRow.style.display = modeNow === 'circular' ? 'flex' : 'none';
@@ -2086,7 +2125,7 @@ if (materialTextureInput) {
       pushHistory();
     } catch (err) {
       console.error('No se pudo cargar la textura:', err);
-      alert('No se pudo cargar esa imagen como textura. ¿Es un PNG válido?');
+      showToast('No se pudo cargar esa imagen como textura. ¿Es un PNG válido?', 'error');
     }
   });
 }
@@ -3085,6 +3124,38 @@ function circularSlotPosition(center, axis, radius, angle) {
   return pos;
 }
 
+// --- Efector Aleatorio del Clonador ---
+// Pedido de Andres despues de ver el "Random Effector" del proyecto de
+// referencia Cinema 4D Web: variacion aleatoria de posicion/rotacion/
+// escala por copia, pero DETERMINISTA -- la misma semilla (randomSeed,
+// generada una sola vez por clonador) siempre da el mismo numero para la
+// misma copia (mismo indice + mismo canal), sin importar cuantas veces se
+// recalculen las copias. Por eso cambiar la cantidad de copias en
+// Atributos no "revuelve" el desorden ya asignado a las que ya existian:
+// cada indice de copia mantiene siempre su propio numero aleatorio, solo
+// se agregan o sacan copias del final. channel: 0/1/2 = offset de posicion
+// X/Y/Z, 3/4/5 = offset de rotacion X/Y/Z, 6 = factor de escala.
+function clonerRandomJitter(seed, index, channel) {
+  let h = (seed ^ Math.imul(index + 1, 0x9E3779B1) ^ Math.imul(channel + 1, 0x85EBCA6B)) | 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45D9F3B);
+  h = Math.imul(h ^ (h >>> 16), 0x45D9F3B);
+  h = h ^ (h >>> 16);
+  return (((h >>> 0) / 4294967296) * 2) - 1; // [-1, 1)
+}
+
+// Factor de escala aleatoria de una copia ya creada. Se RECALCULA (no se
+// guarda en la copia) porque syncClonerChildrenLive() corre 60x por
+// segundo y copia la escala del original tal cual sobre cada copia -- si
+// el factor viviera solo en memoria de la copia, un deshacer/rehacer o
+// abrir un proyecto guardado lo perderia hasta el proximo recalculo del
+// clonador. Reconstruirlo siempre desde datos guardados (randomSeed,
+// randomScale, clonerCloneIndex) evita ese hueco.
+function clonerChildScaleFactor(clonerEntry, child) {
+  const amt = (clonerEntry.randomScale || 0) / 100;
+  if (!amt || child.clonerCloneIndex == null || clonerEntry.randomSeed == null) return 1;
+  return 1 + clonerRandomJitter(clonerEntry.randomSeed, child.clonerCloneIndex, 6) * amt;
+}
+
 function updateClonerLive(clonerEntry) {
   if (!clonerEntry || !clonerEntry.clonerMode) return;
   const srcId = clonerEntry.clonerSourceId;
@@ -3122,18 +3193,41 @@ function updateClonerLive(clonerEntry) {
   const srcPos = new THREE.Vector3();
   src.mesh.getWorldPosition(srcPos);
 
+  // Efector Aleatorio: semilla fija por clonador (se auto-genera UNA sola
+  // vez, igual que circleCenter mas arriba para Circular, para que un
+  // diseño guardado ANTES de que existiera este campo no se rompa).
+  if (clonerEntry.randomSeed == null) clonerEntry.randomSeed = Math.floor(Math.random() * 1e9);
+  const rndSeed = clonerEntry.randomSeed;
+  const rndPosAmt = clonerEntry.randomPos || 0;
+  const rndRotAmt = (clonerEntry.randomRot || 0) * Math.PI / 180;
+  const rndScaleAmt = (clonerEntry.randomScale || 0) / 100;
+  let rndIdx = 0;
+
   if (mode === 'linear') {
     const ox = clonerEntry.sepX != null ? clonerEntry.sepX : 80;
     const oy = clonerEntry.sepY != null ? clonerEntry.sepY : 0;
     const oz = clonerEntry.sepZ != null ? clonerEntry.sepZ : 0;
     for (let i = 1; i <= count; i++) {
       const pos = srcPos.clone().add(new THREE.Vector3(ox * i, oy * i, oz * i));
+      if (rndPosAmt) {
+        pos.x += clonerRandomJitter(rndSeed, rndIdx, 0) * rndPosAmt;
+        pos.y += clonerRandomJitter(rndSeed, rndIdx, 1) * rndPosAmt;
+        pos.z += clonerRandomJitter(rndSeed, rndIdx, 2) * rndPosAmt;
+      }
       const newId = cloneEntryAt(src, pos);
       const e = sceneObjects.get(newId);
       if (e) {
+        e.clonerCloneIndex = rndIdx;
+        if (rndRotAmt) {
+          e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
+          e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
+          e.mesh.rotation.z += clonerRandomJitter(rndSeed, rndIdx, 5) * rndRotAmt;
+        }
+        if (rndScaleAmt) e.mesh.scale.multiplyScalar(clonerChildScaleFactor(clonerEntry, e));
         clonerEntry.mesh.attach(e.mesh);
         e.parentId = clonerEntry.id;
         clonerEntry.clonerChildIds.push(newId);
+        rndIdx++;
       }
     }
   } else if (mode === 'circular') {
@@ -3187,6 +3281,11 @@ function updateClonerLive(clonerEntry) {
     for (let i = 1; i < total; i++) {
       const a = angleStep * i;
       const pos = circularSlotPosition(center, axis, radius, a);
+      if (rndPosAmt) {
+        pos.x += clonerRandomJitter(rndSeed, rndIdx, 0) * rndPosAmt;
+        pos.y += clonerRandomJitter(rndSeed, rndIdx, 1) * rndPosAmt;
+        pos.z += clonerRandomJitter(rndSeed, rndIdx, 2) * rndPosAmt;
+      }
       const newId = cloneEntryAt(src, pos);
       const e = sceneObjects.get(newId);
       if (e) {
@@ -3195,9 +3294,17 @@ function updateClonerLive(clonerEntry) {
           else if (rotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + a;
           else e.mesh.rotation.y = src.mesh.rotation.y + a;
         }
+        e.clonerCloneIndex = rndIdx;
+        if (rndRotAmt) {
+          e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
+          e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
+          e.mesh.rotation.z += clonerRandomJitter(rndSeed, rndIdx, 5) * rndRotAmt;
+        }
+        if (rndScaleAmt) e.mesh.scale.multiplyScalar(clonerChildScaleFactor(clonerEntry, e));
         clonerEntry.mesh.attach(e.mesh);
         e.parentId = clonerEntry.id;
         clonerEntry.clonerChildIds.push(newId);
+        rndIdx++;
       }
     }
   } else if (mode === 'grid') {
@@ -3223,6 +3330,11 @@ function updateClonerLive(clonerEntry) {
         for (let ix = 0; ix < gx; ix++) {
           if (first) { first = false; continue; } // el primer casillero es el objeto original
           const pos = new THREE.Vector3(startX + ix * sx, startY + iy * sy, startZ + iz * sz);
+          if (rndPosAmt) {
+            pos.x += clonerRandomJitter(rndSeed, rndIdx, 0) * rndPosAmt;
+            pos.y += clonerRandomJitter(rndSeed, rndIdx, 1) * rndPosAmt;
+            pos.z += clonerRandomJitter(rndSeed, rndIdx, 2) * rndPosAmt;
+          }
           const newId = cloneEntryAt(src, pos);
           const e = sceneObjects.get(newId);
           if (e) {
@@ -3231,9 +3343,17 @@ function updateClonerLive(clonerEntry) {
               else if (rotAxis === 'z') e.mesh.rotation.z = src.mesh.rotation.z + rotRad;
               else e.mesh.rotation.y = src.mesh.rotation.y + rotRad;
             }
+            e.clonerCloneIndex = rndIdx;
+            if (rndRotAmt) {
+              e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
+              e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
+              e.mesh.rotation.z += clonerRandomJitter(rndSeed, rndIdx, 5) * rndRotAmt;
+            }
+            if (rndScaleAmt) e.mesh.scale.multiplyScalar(clonerChildScaleFactor(clonerEntry, e));
             clonerEntry.mesh.attach(e.mesh);
             e.parentId = clonerEntry.id;
             clonerEntry.clonerChildIds.push(newId);
+            rndIdx++;
           }
         }
       }
@@ -3299,7 +3419,7 @@ function syncClonerChildrenLive(clonerEntry) {
   clonerEntry.clonerChildIds.forEach(cid => {
     const c = sceneObjects.get(cid);
     if (!c) return;
-    c.mesh.scale.copy(src.mesh.scale);
+    c.mesh.scale.copy(src.mesh.scale).multiplyScalar(clonerChildScaleFactor(clonerEntry, c));
     if (!srcMats.length || !c.mesh.material) return;
     const dstMats = Array.isArray(c.mesh.material) ? c.mesh.material : [c.mesh.material];
     for (let i = 0; i < srcMats.length && i < dstMats.length; i++) {
@@ -3421,6 +3541,33 @@ if (clonerCountInput) {
     const cloner = getActiveCloner();
     if (!cloner) return;
     cloner[keys[idx]] = parseFloat(inp.value) || 0;
+    updateClonerLive(cloner);
+  });
+  inp.addEventListener('change', () => pushHistory());
+});
+
+// Efector Aleatorio: 3 sliders (posicion / rotacion / escala) que agregan
+// variacion aleatoria (pero determinista, ver clonerRandomJitter mas
+// arriba) por copia -- pedido de Andres tras ver el "Random Effector" del
+// proyecto de referencia Cinema 4D Web. En 0 (por defecto) no cambia nada
+// del comportamiento de siempre.
+const clonerRandomPosInput = document.getElementById('clonerRandomPosInput');
+const clonerRandomPosVal = document.getElementById('clonerRandomPosVal');
+const clonerRandomRotInput = document.getElementById('clonerRandomRotInput');
+const clonerRandomRotVal = document.getElementById('clonerRandomRotVal');
+const clonerRandomScaleInput = document.getElementById('clonerRandomScaleInput');
+const clonerRandomScaleVal = document.getElementById('clonerRandomScaleVal');
+[
+  [clonerRandomPosInput, clonerRandomPosVal, 'randomPos'],
+  [clonerRandomRotInput, clonerRandomRotVal, 'randomRot'],
+  [clonerRandomScaleInput, clonerRandomScaleVal, 'randomScale']
+].forEach(([inp, out, key]) => {
+  if (!inp) return;
+  inp.addEventListener('input', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner[key] = parseFloat(inp.value) || 0;
+    if (out) out.textContent = cloner[key];
     updateClonerLive(cloner);
   });
   inp.addEventListener('change', () => pushHistory());
@@ -3739,7 +3886,7 @@ async function loadHDRIFile(file) {
     hdriControlsRow.style.display = 'block';
   } catch (err) {
     console.error('No se pudo cargar el HDRI:', err);
-    alert('No se pudo cargar ese archivo como HDRI. ¿Es un archivo .hdr válido?');
+    showToast('No se pudo cargar ese archivo como HDRI. ¿Es un archivo .hdr válido?', 'error');
   } finally {
     URL.revokeObjectURL(url);
     hdriLoadingMsg.style.display = 'none';
@@ -3874,6 +4021,23 @@ function renderLayerList() {
     label.className = 'layer-label';
     label.textContent = (entry.parentId != null ? '↳ ' : '') + (entry.name || KIND_LABEL[entry.kind] || entry.kind);
     top.appendChild(label);
+
+    // Medallitas: a simple vista, que modificador tiene esta figura/grupo
+    // (Clonador o Simetria) sin tener que seleccionarla primero para
+    // revisar Atributos -- inspirado en las medallitas del arbol de escena
+    // del proyecto de referencia Cinema 4D Web que compartio Andres.
+    if (entry.clonerMode != null) {
+      const clonerBadge = document.createElement('span');
+      clonerBadge.className = 'layer-badge badge-cloner';
+      clonerBadge.textContent = 'Clonador';
+      top.appendChild(clonerBadge);
+    }
+    if (entry.symmetrySourceId != null) {
+      const symBadge = document.createElement('span');
+      symBadge.className = 'layer-badge badge-sym';
+      symBadge.textContent = 'Simetría';
+      top.appendChild(symBadge);
+    }
 
     const eyeBtn = document.createElement('button');
     eyeBtn.className = 'layer-btn';
@@ -4014,6 +4178,11 @@ function snapshotEntry(e) {
       clonerAxis: e.clonerAxis || null,
       clonerRotAxis: e.clonerRotAxis || null,
       circleCenter: e.circleCenter ? { x: e.circleCenter.x, y: e.circleCenter.y, z: e.circleCenter.z } : null,
+      randomPos: e.randomPos || 0,
+      randomRot: e.randomRot || 0,
+      randomScale: e.randomScale || 0,
+      randomSeed: e.randomSeed != null ? e.randomSeed : null,
+      clonerCloneIndex: e.clonerCloneIndex != null ? e.clonerCloneIndex : null,
       // gridX/Y/Z quedaban SIN guardar antes de este arreglo -- un
       // clonador en modo Cuadricula perdia sus filas/columnas/pisos (volvia
       // a 3x1x3 por defecto) apenas se deshacia (Ctrl+Z) o se guardaba y
@@ -4138,6 +4307,11 @@ function buildEntryFromSnapshot(s) {
     clonerAxis: s.clonerAxis || null,
     clonerRotAxis: s.clonerRotAxis || null,
     circleCenter: s.circleCenter ? { x: s.circleCenter.x, y: s.circleCenter.y, z: s.circleCenter.z } : null,
+    randomPos: s.randomPos || 0,
+    randomRot: s.randomRot || 0,
+    randomScale: s.randomScale || 0,
+    randomSeed: s.randomSeed != null ? s.randomSeed : null,
+    clonerCloneIndex: s.clonerCloneIndex != null ? s.clonerCloneIndex : null,
     gridX: s.gridX != null ? s.gridX : null,
     gridY: s.gridY != null ? s.gridY : null,
     gridZ: s.gridZ != null ? s.gridZ : null,
@@ -4466,7 +4640,7 @@ function loadProjectsMap() {
 }
 function saveProjectsMap(map) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(map)); }
-  catch (e) { alert('No se pudo guardar (¿memoria del navegador llena?).'); }
+  catch (e) { showToast('No se pudo guardar (¿memoria del navegador llena?).', 'error'); }
 }
 
 function saveProjectAs(name) {
@@ -4670,12 +4844,12 @@ importJsonInput.addEventListener('change', (e) => {
         history = [snapshotScene()];
         historyIndex = 0;
         updateHistoryButtons();
-        alert('¡Proyecto cargado exitosamente!');
+        showToast('¡Proyecto cargado exitosamente!', 'success');
       } else {
-        alert('Archivo de proyecto no válido.');
+        showToast('Archivo de proyecto no válido.', 'error');
       }
     } catch (err) {
-      alert('Error al leer el archivo JSON.');
+      showToast('Error al leer el archivo JSON.', 'error');
     }
   };
   reader.readAsText(file);
@@ -5810,7 +5984,7 @@ if (extrudeApplyBtn) extrudeApplyBtn.addEventListener('click', () => {
   if (selectedId == null) return;
   const entry = sceneObjects.get(selectedId);
   if (entry && entry.splinePoints && entry.splinePoints.length < 3) {
-    alert('Hacen falta al menos 3 puntos para cerrar la forma y darle volumen con Extrusión.');
+    showToast('Hacen falta al menos 3 puntos para cerrar la forma y darle volumen con Extrusión.', 'error');
     return;
   }
   applyExtrude(entry, EXTRUDE_DEFAULT_DEPTH, false, EXTRUDE_DEFAULT_BEVEL_SIZE);
@@ -6698,7 +6872,7 @@ if (arrayCloneBtn) {
       if (existing.id !== selectedId) selectObject(existing.id);
       const attrTabBtn = document.querySelector('.tab-btn[data-tab="tabAttributes"]');
       if (attrTabBtn) attrTabBtn.click();
-      alert('Esta figura ya tiene un Clonador aplicado. Para cambiar cantidad, separación, radio o modo, hacelo desde la pestaña Atributos (los cambios se ven al instante) en vez de crear otro.');
+      showToast('Esta figura ya tiene un Clonador aplicado. Para cambiar cantidad, separación, radio o modo, hacelo desde la pestaña Atributos (los cambios se ven al instante) en vez de crear otro.', 'info');
       return;
     }
     arrayModal.classList.add('show');

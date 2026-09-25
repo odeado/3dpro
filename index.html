@@ -189,13 +189,34 @@
   .layer-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #abb2bf; font-size: 12px; }
   .layer-actions { display: flex; align-items: center; gap: 2px; }
   .layer-btn { background: none; border: none; color: #5c6370; font-size: 12px; padding: 2px 4px; cursor: pointer; border-radius: 3px; }
+  /* Medallitas junto al nombre en Objetos: que modificador tiene esta
+     figura/grupo (Clonador o Simetria) a simple vista -- ver renderLayerList()
+     en main.js. Inspirado en las medallitas del arbol de escena del
+     proyecto de referencia Cinema 4D Web. */
+  .layer-badge {
+    font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 8px;
+    text-transform: uppercase; letter-spacing: 0.03em; flex: 0 0 auto;
+  }
+  .badge-cloner { background: rgba(136, 221, 136, 0.18); color: #88dd88; border: 1px solid rgba(136, 221, 136, 0.4); }
+  .badge-sym { background: rgba(107, 184, 255, 0.18); color: #6bb8ff; border: 1px solid rgba(107, 184, 255, 0.4); }
   .layer-btn:hover { color: #abb2bf; background: var(--bg-hover); }
   .collapse-btn { background: none; border: none; color: #5c6370; font-size: 10px; padding: 2px; cursor: pointer; }
 
   .prop-group {
-    background: #21252b; border: 1px solid var(--border-color); border-radius: 6px;
+    background: #21252b; border: 1px solid var(--border-color); border-radius: 10px;
     padding: 10px; display: flex; flex-direction: column; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
   }
+  /* Estetica sept. 2026 (inspirada en el proyecto de referencia Cinema 4D
+     Web que compartio Andres): franja de color a la izquierda de cada
+     tarjeta de Atributos, para reconocer de un vistazo que tipo de
+     modificador es sin tener que leer el titulo -- mismo color que su
+     medallita en Objetos (badge-cloner/badge-sym) y que el boton que lo
+     crea (btn-mirror, etc.). Puramente visual, ningun cambio de logica. */
+  .prop-group.accent-sym { border-left: 3px solid #6bb8ff; }
+  .prop-group.accent-cloner { border-left: 3px solid #88dd88; }
+  .prop-group.accent-light { border-left: 3px solid #f5a623; }
+  .prop-group.accent-text { border-left: 3px solid #38bdf8; }
   .prop-row {
     display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #abb2bf;
   }
@@ -267,6 +288,44 @@
   }
   #statusInfo { font-weight: 500; color: #abb2bf; }
   #statusHint { font-size: 11px; color: #5c6370; }
+
+  /* Notificaciones tipo "toast" (reemplazan los alert() nativos que
+     bloqueaban todo el hilo, incluida la animacion 3D -- ver showToast()
+     en main.js). Inspirado en el sistema de notificaciones del proyecto
+     de referencia Cinema 4D Web, reimplementado en CSS propio. */
+  .toast-container {
+    position: fixed; top: calc(var(--header-h) + var(--context-h) + 10px);
+    left: 50%; transform: translateX(-50%); z-index: 300;
+    display: flex; flex-direction: column; gap: 6px; align-items: center;
+    pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto; cursor: pointer;
+    background: #21252b; border: 1px solid var(--border-color);
+    color: #dfe3e8; font-size: 12px; font-weight: 500;
+    padding: 8px 16px; border-radius: 20px; max-width: 80vw;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+    animation: toast-in 0.25s ease-out;
+  }
+  .toast-out { animation: toast-out 0.2s ease-in forwards; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-10px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  @keyframes toast-out { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(-6px) scale(0.95); } }
+  .toast-error { border-color: #ef4444; color: #fca5a5; }
+  .toast-success { border-color: var(--accent); color: #ffe08a; }
+  .toast-info { border-color: #38bdf8; color: #7dd3fc; }
+
+  /* Efector Aleatorio (dentro de "Modificador Clonador" en Atributos):
+     separado del resto de los controles con una linea punteada y titulo
+     propio en verde (mismo color que el Clonador), como en el proyecto de
+     referencia Cinema 4D Web. */
+  .cloner-effector-block {
+    display: flex; flex-direction: column; gap: 10px;
+    padding-top: 10px; margin-top: 2px; border-top: 1px dashed rgba(136, 221, 136, 0.3);
+  }
+  .cloner-effector-title {
+    font-size: 11px; font-weight: 700; color: #88dd88;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
 
   /* Viewport Quad Labels & Dividers */
   .vp-label {
@@ -688,7 +747,7 @@
         <!-- 2. Parámetros de Modificador Simetría (En vivo) -->
         <div id="symPropsSection" style="display:none;">
           <h3>🪞 Modificador de Simetría</h3>
-          <div class="prop-group">
+          <div class="prop-group accent-sym">
             <div class="prop-row">
               <label>Eje de Espejo</label>
               <select id="symAxisSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
@@ -708,7 +767,7 @@
         <!-- 3. Parámetros de Modificador Clonador (En vivo) -->
         <div id="clonerPropsSection" style="display:none;">
           <h3>🔁 Modificador Clonador</h3>
-          <div class="prop-group">
+          <div class="prop-group accent-cloner">
             <div class="prop-row">
               <label>Modo de Clonación</label>
               <select id="clonerModeSelect" class="axis-input" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; text-align:left;">
@@ -762,6 +821,26 @@
                 <option value="z">Z</option>
               </select>
             </div>
+            <!-- Efector Aleatorio: variacion aleatoria (pero determinista -- misma
+                 semilla = mismo resultado) de posicion/rotacion/escala por
+                 copia. En 0 (por defecto) no cambia nada de lo de siempre.
+                 Pedido de Andres tras ver el "Random Effector" del
+                 proyecto de referencia Cinema 4D Web. -->
+            <div class="cloner-effector-block">
+              <div class="cloner-effector-title">✨ Efector Aleatorio</div>
+              <div class="prop-row">
+                <label>Posición Aleatoria: <span id="clonerRandomPosVal">0</span> mm</label>
+                <input id="clonerRandomPosInput" type="range" min="0" max="150" step="1" value="0">
+              </div>
+              <div class="prop-row">
+                <label>Rotación Aleatoria: <span id="clonerRandomRotVal">0</span>°</label>
+                <input id="clonerRandomRotInput" type="range" min="0" max="180" step="1" value="0">
+              </div>
+              <div class="prop-row">
+                <label>Escala Aleatoria: <span id="clonerRandomScaleVal">0</span>%</label>
+                <input id="clonerRandomScaleInput" type="range" min="0" max="90" step="1" value="0">
+              </div>
+            </div>
             <button id="clonerBakeBtn" class="context-btn" style="justify-content:center;">⚡ Convertir a Objetos Fijos</button>
           </div>
         </div>
@@ -769,7 +848,7 @@
         <!-- 3b. Texto 3D (En vivo) -->
         <div id="textPropsSection" style="display:none;">
           <h3>🔤 Texto 3D</h3>
-          <div class="prop-group">
+          <div class="prop-group accent-text">
             <div class="prop-row">
               <label>Texto</label>
               <input id="textContentInput" type="text" maxlength="40" style="background:#181a1f; padding:6px; border:1px solid var(--border-color); border-radius:4px; color:#e6e6e6;" value="Hola">
@@ -934,7 +1013,7 @@
         <!-- 3c. Luz (Puntual / Foco) -->
         <div id="lightPropsSection" style="display:none;">
           <h3 id="lightPropsTitle">💡 Luz</h3>
-          <div class="prop-group">
+          <div class="prop-group accent-light">
             <div class="prop-row">
               <label>Color</label>
               <input id="lightColorInput" type="color" value="#ffe9b3">
@@ -1107,6 +1186,8 @@
       </div>
     </div>
   </div>
+
+  <div id="toastContainer" class="toast-container"></div>
 
   <script type="importmap">
   {
