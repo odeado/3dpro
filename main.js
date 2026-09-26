@@ -1328,13 +1328,16 @@ function removeObject(id) {
 
 function copySculptIfAny(srcEntry, destNode) {
   if (!srcEntry.sculpted || !srcEntry.mesh.geometry || !destNode.geometry) return false;
-  const srcPos = srcEntry.mesh.geometry.attributes.position;
-  const destPos = destNode.geometry.attributes.position;
-  if (!srcPos || !destPos || srcPos.array.length !== destPos.array.length) return false;
-  destPos.array.set(srcPos.array);
-  destPos.needsUpdate = true;
-  destNode.geometry.computeVertexNormals();
-  destNode.geometry.computeBoundingSphere();
+  // Antes copiaba solo el arreglo de posiciones, y solo si el largo
+  // coincidia con el de una figura recien construida sin esculpir. Desde
+  // la Subdivision Dinamica del Esculpir (dyntopoSubdivideNearBrush, ver
+  // mas abajo) una figura esculpida puede tener MAS vertices/triangulos
+  // que la version "de fabrica" de su kind -- clonar la geometria entera
+  // (posiciones + UV + indice) es lo unico que sigue siendo correcto sin
+  // importar cuanto haya crecido la malla.
+  const cloned = srcEntry.mesh.geometry.clone();
+  destNode.geometry.dispose();
+  destNode.geometry = cloned;
   return true;
 }
 
@@ -1862,6 +1865,20 @@ function selectObject(id) {
         if (clonerRandomRotVal) clonerRandomRotVal.textContent = clonerEntry.randomRot || 0;
         if (clonerRandomScaleInput) clonerRandomScaleInput.value = clonerEntry.randomScale || 0;
         if (clonerRandomScaleVal) clonerRandomScaleVal.textContent = clonerEntry.randomScale || 0;
+
+        // Escala Progresiva: checkbox + "Invertir" (solo se ve con el
+        // checkbox prendido -- no tiene sentido invertir una rampa que no
+        // existe) y la etiqueta del slider de arriba cambia de nombre para
+        // dejar claro que, en este modo, ese numero es el RANGO de la rampa
+        // (grande<->chico) y no una fuerza de variacion al azar.
+        const clonerScaleProgressiveInput = document.getElementById('clonerScaleProgressiveInput');
+        const clonerScaleProgressiveInvertInput = document.getElementById('clonerScaleProgressiveInvertInput');
+        const clonerScaleInvertLabel = document.getElementById('clonerScaleInvertLabel');
+        const clonerScaleLabelText = document.getElementById('clonerScaleLabelText');
+        if (clonerScaleProgressiveInput) clonerScaleProgressiveInput.checked = !!clonerEntry.scaleProgressive;
+        if (clonerScaleProgressiveInvertInput) clonerScaleProgressiveInvertInput.checked = !!clonerEntry.scaleProgressiveInvert;
+        if (clonerScaleInvertLabel) clonerScaleInvertLabel.style.display = clonerEntry.scaleProgressive ? 'flex' : 'none';
+        if (clonerScaleLabelText) clonerScaleLabelText.textContent = clonerEntry.scaleProgressive ? 'Rango de Escala (Progresivo)' : 'Escala Aleatoria';
 
         const modeNow = clonerEntry.clonerMode || 'linear';
         if (clonerLinearRow) clonerLinearRow.style.display = modeNow === 'linear' ? 'flex' : 'none';
@@ -3024,27 +3041,23 @@ function symAxisIndex(axis) {
 // crear la simetria por primera vez). Antes, "Eje de Espejo" solo guardaba
 // el valor elegido pero nunca volvia a armar el espejo -- por eso cambiar
 // de X a Y o Z no cambiaba nada en pantalla.
-function remirrorSymmetry(symEntry) {
-  const srcId = symEntry.symmetrySourceId;
-  const src = sceneObjects.get(srcId);
-  if (!src) return;
-  if (isCustomGeomKind(src.kind)) return; // el pelo/curva/revolucion no tienen una formula fija -- no se pueden re-espejar sin repetir el trazo/generador
-  let mirrorEntry = null;
-  sceneObjects.forEach(e => { if (e.parentId === symEntry.id && e.isMirrorOf === srcId) mirrorEntry = e; });
-  if (!mirrorEntry || !mirrorEntry.mesh.geometry || !src.mesh.geometry) return;
-
-  const ax = symAxisIndex(symEntry.symAxis);
-  const geo = src.mesh.geometry.clone();
+// Clona una geometria y la espeja sobre el eje indicado (0=X,1=Y,2=Z),
+// invirtiendo tambien el orden de vertices (winding) para que las normales
+// sigan apuntando hacia afuera -- espejar sobre CUALQUIER eje invierte la
+// orientacion del mismo modo, asi que el arreglo es igual sin importar el
+// eje. Compartida por remirrorSymmetry() (cambio de eje desde Atributos) y
+// por syncSymmetryMirrorsFor() (sincronizacion en vivo, cuando la fuente
+// cambio de TOPOLOGIA -- por ejemplo por la Subdivision Dinamica del
+// Esculpir, ver dyntopoSubdivideNearBrush mas abajo -- y ya no alcanza con
+// copiar posiciones por indice porque la cantidad de vertices no coincide).
+function buildMirroredGeometry(srcGeo, ax) {
+  const geo = srcGeo.clone();
   const posAttr = geo.attributes.position;
   for (let i = 0; i < posAttr.count; i++) {
     if (ax === 0) posAttr.setX(i, -posAttr.getX(i));
     else if (ax === 1) posAttr.setY(i, -posAttr.getY(i));
     else posAttr.setZ(i, -posAttr.getZ(i));
   }
-  // Invertir el orden de vertices en los triangulos (winding) para que las
-  // normales sigan apuntando hacia afuera -- espejar sobre CUALQUIER eje
-  // invierte la orientacion (handedness) del mismo modo, asi que el arreglo
-  // es el mismo sin importar cual eje se haya elegido.
   if (geo.index) {
     const idxArr = geo.index.array;
     for (let i = 0; i < idxArr.length; i += 3) {
@@ -3057,6 +3070,20 @@ function remirrorSymmetry(symEntry) {
   posAttr.needsUpdate = true;
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
+  return geo;
+}
+
+function remirrorSymmetry(symEntry) {
+  const srcId = symEntry.symmetrySourceId;
+  const src = sceneObjects.get(srcId);
+  if (!src) return;
+  if (isCustomGeomKind(src.kind)) return; // el pelo/curva/revolucion no tienen una formula fija -- no se pueden re-espejar sin repetir el trazo/generador
+  let mirrorEntry = null;
+  sceneObjects.forEach(e => { if (e.parentId === symEntry.id && e.isMirrorOf === srcId) mirrorEntry = e; });
+  if (!mirrorEntry || !mirrorEntry.mesh.geometry || !src.mesh.geometry) return;
+
+  const ax = symAxisIndex(symEntry.symAxis);
+  const geo = buildMirroredGeometry(src.mesh.geometry, ax);
   mirrorEntry.mesh.geometry.dispose();
   mirrorEntry.mesh.geometry = geo;
   mirrorEntry.sculpted = !!src.sculpted;
@@ -3143,16 +3170,35 @@ function clonerRandomJitter(seed, index, channel) {
   return (((h >>> 0) / 4294967296) * 2) - 1; // [-1, 1)
 }
 
-// Factor de escala aleatoria de una copia ya creada. Se RECALCULA (no se
-// guarda en la copia) porque syncClonerChildrenLive() corre 60x por
-// segundo y copia la escala del original tal cual sobre cada copia -- si
-// el factor viviera solo en memoria de la copia, un deshacer/rehacer o
+// Factor de escala aleatoria (o progresiva) de una copia ya creada. Se
+// RECALCULA (no se guarda en la copia) porque syncClonerChildrenLive() corre
+// 60x por segundo y copia la escala del original tal cual sobre cada copia --
+// si el factor viviera solo en memoria de la copia, un deshacer/rehacer o
 // abrir un proyecto guardado lo perderia hasta el proximo recalculo del
 // clonador. Reconstruirlo siempre desde datos guardados (randomSeed,
-// randomScale, clonerCloneIndex) evita ese hueco.
+// randomScale, clonerCloneIndex/clonerCloneTotal) evita ese hueco.
+//
+// Andres pidio ademas una variante NO aleatoria: una rampa pareja de grande a
+// chico (o al reves, con "Invertir") a lo largo de las copias -- como el
+// efector "Step"/"Plain" con Scale de Cinema4D/Blender, en vez del "Random".
+// Reusa el mismo deslizador "Escala Aleatoria" como el RANGO de la rampa
+// (por ejemplo, 40% da copias que van de 1.4x a 0.6x) para no agregar un
+// control nuevo -- el checkbox "Progresivo" solo cambia CÓMO se reparte ese
+// rango entre las copias (parejo por indice en vez de al azar por hash).
 function clonerChildScaleFactor(clonerEntry, child) {
   const amt = (clonerEntry.randomScale || 0) / 100;
-  if (!amt || child.clonerCloneIndex == null || clonerEntry.randomSeed == null) return 1;
+  if (!amt || child.clonerCloneIndex == null) return 1;
+  if (clonerEntry.scaleProgressive) {
+    const total = child.clonerCloneTotal || 1;
+    // t va de 0 (primera copia) a 1 (ultima copia); con una sola copia
+    // (total 1) no hay "rampa" posible, se deja en el extremo grande.
+    const t = total > 1 ? child.clonerCloneIndex / (total - 1) : 0;
+    const big = 1 + amt, small = 1 - amt;
+    const start = clonerEntry.scaleProgressiveInvert ? small : big;
+    const end = clonerEntry.scaleProgressiveInvert ? big : small;
+    return start + (end - start) * t;
+  }
+  if (clonerEntry.randomSeed == null) return 1;
   return 1 + clonerRandomJitter(clonerEntry.randomSeed, child.clonerCloneIndex, 6) * amt;
 }
 
@@ -3218,6 +3264,7 @@ function updateClonerLive(clonerEntry) {
       const e = sceneObjects.get(newId);
       if (e) {
         e.clonerCloneIndex = rndIdx;
+        e.clonerCloneTotal = count; // para la Escala Progresiva -- ver clonerChildScaleFactor
         if (rndRotAmt) {
           e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
           e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
@@ -3295,6 +3342,7 @@ function updateClonerLive(clonerEntry) {
           else e.mesh.rotation.y = src.mesh.rotation.y + a;
         }
         e.clonerCloneIndex = rndIdx;
+        e.clonerCloneTotal = count; // para la Escala Progresiva -- ver clonerChildScaleFactor
         if (rndRotAmt) {
           e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
           e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
@@ -3324,6 +3372,7 @@ function updateClonerLive(clonerEntry) {
     const startX = srcPos.x - (gx - 1) * sx / 2;
     const startY = srcPos.y;
     const startZ = srcPos.z - (gz - 1) * sz / 2;
+    const gridTotalCopies = gx * gy * gz - 1; // sin contar el original -- para la Escala Progresiva
     let first = true;
     for (let iy = 0; iy < gy; iy++) {
       for (let iz = 0; iz < gz; iz++) {
@@ -3344,6 +3393,7 @@ function updateClonerLive(clonerEntry) {
               else e.mesh.rotation.y = src.mesh.rotation.y + rotRad;
             }
             e.clonerCloneIndex = rndIdx;
+            e.clonerCloneTotal = gridTotalCopies; // para la Escala Progresiva -- ver clonerChildScaleFactor
             if (rndRotAmt) {
               e.mesh.rotation.x += clonerRandomJitter(rndSeed, rndIdx, 3) * rndRotAmt;
               e.mesh.rotation.y += clonerRandomJitter(rndSeed, rndIdx, 4) * rndRotAmt;
@@ -3572,6 +3622,37 @@ const clonerRandomScaleVal = document.getElementById('clonerRandomScaleVal');
   });
   inp.addEventListener('change', () => pushHistory());
 });
+
+// Escala Progresiva (sept. 2026): checkbox "Progresivo" que cambia el
+// significado del slider "Escala Aleatoria" de arriba -- de "variacion al
+// azar por copia" a "rango de una rampa pareja grande->chico" (o al reves,
+// con "Invertir"). Reconstruye el clonador entero (updateClonerLive) porque
+// el reparto de la rampa depende de CUANTAS copias hay en total, no solo del
+// valor del slider.
+const clonerScaleProgressiveInput = document.getElementById('clonerScaleProgressiveInput');
+const clonerScaleProgressiveInvertInput = document.getElementById('clonerScaleProgressiveInvertInput');
+const clonerScaleInvertLabel = document.getElementById('clonerScaleInvertLabel');
+const clonerScaleLabelText = document.getElementById('clonerScaleLabelText');
+if (clonerScaleProgressiveInput) {
+  clonerScaleProgressiveInput.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.scaleProgressive = clonerScaleProgressiveInput.checked;
+    if (clonerScaleInvertLabel) clonerScaleInvertLabel.style.display = cloner.scaleProgressive ? 'flex' : 'none';
+    if (clonerScaleLabelText) clonerScaleLabelText.textContent = cloner.scaleProgressive ? 'Rango de Escala (Progresivo)' : 'Escala Aleatoria';
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
+if (clonerScaleProgressiveInvertInput) {
+  clonerScaleProgressiveInvertInput.addEventListener('change', () => {
+    const cloner = getActiveCloner();
+    if (!cloner) return;
+    cloner.scaleProgressiveInvert = clonerScaleProgressiveInvertInput.checked;
+    updateClonerLive(cloner);
+    pushHistory();
+  });
+}
 
 const latheSegmentsInput = document.getElementById('latheSegmentsInput');
 const latheSegmentsVal = document.getElementById('latheSegmentsVal');
@@ -4182,6 +4263,14 @@ function snapshotEntry(e) {
       randomRot: e.randomRot || 0,
       randomScale: e.randomScale || 0,
       randomSeed: e.randomSeed != null ? e.randomSeed : null,
+      // Escala Progresiva (sept. 2026): rampa pareja grande->chico por
+      // indice de copia, en vez de la variacion al azar de siempre -- ver
+      // clonerChildScaleFactor. clonerCloneTotal viaja junto a cada copia
+      // (no solo en el clonador) porque el calculo de la rampa necesita
+      // "cuantas copias habia en total" al momento en que ESA copia se creo.
+      scaleProgressive: !!e.scaleProgressive,
+      scaleProgressiveInvert: !!e.scaleProgressiveInvert,
+      clonerCloneTotal: e.clonerCloneTotal != null ? e.clonerCloneTotal : null,
       clonerCloneIndex: e.clonerCloneIndex != null ? e.clonerCloneIndex : null,
       // gridX/Y/Z quedaban SIN guardar antes de este arreglo -- un
       // clonador en modo Cuadricula perdia sus filas/columnas/pisos (volvia
@@ -4241,6 +4330,17 @@ function snapshotEntry(e) {
       // esculpieron -- las demas se reconstruyen con su geometria de
       // siempre, mas liviano para el historial de deshacer/rehacer.
       s.sculptPositions = Array.from(e.mesh.geometry.attributes.position.array);
+      // Subdivision Dinamica (ver dyntopoSubdivideNearBrush mas abajo)
+      // puede haber cambiado la TOPOLOGIA (mas vertices/triangulos que la
+      // version "de fabrica" del kind) -- sin guardar tambien el indice
+      // (y el UV, si tiene) no habria forma de reconstruir esos triangulos
+      // nuevos al deshacer/rehacer o al guardar/abrir el diseño.
+      if (e.mesh.geometry.index) {
+        s.sculptIndex = Array.from(e.mesh.geometry.index.array);
+      }
+      if (e.mesh.geometry.attributes.uv) {
+        s.sculptUv = Array.from(e.mesh.geometry.attributes.uv.array);
+      }
     }
     return s;
 }
@@ -4274,13 +4374,30 @@ function buildEntryFromSnapshot(s) {
   built.node.scale.set(s.sx, s.sy, s.sz);
   built.node.visible = s.visible;
   let sculpted = false;
-  if (!isCustomGeomKind(s.kind) && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position &&
-      built.node.geometry.attributes.position.array.length === s.sculptPositions.length) {
-    built.node.geometry.attributes.position.array.set(s.sculptPositions);
-    built.node.geometry.attributes.position.needsUpdate = true;
-    built.node.geometry.computeVertexNormals();
-    built.node.geometry.computeBoundingSphere();
-    sculpted = true;
+  if (!isCustomGeomKind(s.kind) && s.sculptPositions && built.node.geometry && built.node.geometry.attributes.position) {
+    const geo = built.node.geometry;
+    if (s.sculptIndex) {
+      // La topologia pudo haber crecido (Subdivision Dinamica del
+      // Esculpir) -- en vez de pisar solo las posiciones de la geometria
+      // "de fabrica" recien construida (que ya no tiene la cantidad
+      // correcta de vertices/triangulos), se reemplazan posicion+UV+indice
+      // enteros por los que quedaron guardados.
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(s.sculptPositions, 3));
+      if (s.sculptUv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(s.sculptUv, 2));
+      geo.setIndex(s.sculptIndex);
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      sculpted = true;
+    } else if (geo.attributes.position.array.length === s.sculptPositions.length) {
+      // Dato guardado antes de que existiera Subdivision Dinamica (sin
+      // sculptIndex) -- misma cantidad de vertices de siempre, alcanza con
+      // pisar el arreglo de posiciones tal cual se hacia antes.
+      geo.attributes.position.array.set(s.sculptPositions);
+      geo.attributes.position.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      sculpted = true;
+    }
   }
   built.pickMesh.userData.ownerId = s.id;
   // La textura se restaura de forma ASINCRONICA (decodificar un dataURL
@@ -4311,6 +4428,9 @@ function buildEntryFromSnapshot(s) {
     randomRot: s.randomRot || 0,
     randomScale: s.randomScale || 0,
     randomSeed: s.randomSeed != null ? s.randomSeed : null,
+    scaleProgressive: !!s.scaleProgressive,
+    scaleProgressiveInvert: !!s.scaleProgressiveInvert,
+    clonerCloneTotal: s.clonerCloneTotal != null ? s.clonerCloneTotal : null,
     clonerCloneIndex: s.clonerCloneIndex != null ? s.clonerCloneIndex : null,
     gridX: s.gridX != null ? s.gridX : null,
     gridY: s.gridY != null ? s.gridY : null,
@@ -6092,6 +6212,9 @@ function syncSymmetryMirrorsFor(srcId) {
       const srcPos = srcEntry.mesh.geometry.attributes.position;
       const dstPos = e.mesh.geometry.attributes.position;
       if (srcPos && dstPos && srcPos.count === dstPos.count) {
+        // Camino rapido de siempre: misma cantidad de vertices (la
+        // topologia no cambio desde la ultima sincronizacion), alcanza con
+        // copiar posiciones espejadas por indice.
         for (let i = 0; i < srcPos.count; i++) {
           const vx = srcPos.getX(i), vy = srcPos.getY(i), vz = srcPos.getZ(i);
           dstPos.setXYZ(i, ax === 0 ? -vx : vx, ax === 1 ? -vy : vy, ax === 2 ? -vz : vz);
@@ -6100,9 +6223,207 @@ function syncSymmetryMirrorsFor(srcId) {
         e.mesh.geometry.computeVertexNormals();
         e.mesh.geometry.computeBoundingSphere();
         e.sculpted = true;
+      } else if (srcPos) {
+        // La cantidad de vertices ya NO coincide -- la fuente se
+        // subdividio dinamicamente (Subdivision Dinamica del Esculpir, ver
+        // dyntopoSubdivideNearBrush mas abajo) desde la ultima vez que se
+        // sincronizo este espejo. Copiar por indice ya no tiene sentido
+        // con topologias distintas -- se clona la geometria ACTUAL de la
+        // fuente entera y se la vuelve a espejar de cero, mismo mecanismo
+        // que remirrorSymmetry() usa al cambiar de eje.
+        const geo = buildMirroredGeometry(srcEntry.mesh.geometry, ax);
+        e.mesh.geometry.dispose();
+        e.mesh.geometry = geo;
+        e.sculpted = true;
       }
     }
   });
+}
+
+// --- Subdivision Dinamica del Esculpir (Dyntopo-lite, sept. 2026) ---
+// Andres mando capturas de Nomad Sculpt (una app de esculpir en iPad) y
+// pidio que la superficie se mantenga lisa/densa sin importar cuanto se
+// estire, en vez de dejar "aletas" finitas como pasaba antes (ver seccion
+// "Esculpir se rompia..." mas arriba, que solo mitigaba el problema con un
+// relajado automatico, sin agregar malla nueva de verdad). Nomad logra esto
+// con "voxel remeshing"; ac\u00e1 se implement\u00f3 la variante mucho m\u00e1s liviana
+// que usan los editores de terreno/FEM ("subdivision adaptativa por
+// arista"): mientras se esculpe, cualquier arista que quede mas ESTIRADA
+// que un largo objetivo (proporcional al tama\u00f1o del pincel) se corta al
+// medio, agregando triangulos nuevos justo donde hacen falta -- sin volver
+// a mallar toda la figura de cero en cada trazo.
+const DYNTOPO_MAX_TRIS = 50000; // limite de seguridad por figura (evita crecer sin fin)
+const DYNTOPO_DETAIL_DIVISOR = 5; // largo de arista objetivo = radio del pincel / esto
+
+function dynEdgeKey(a, b) { return a < b ? (a + '_' + b) : (b + '_' + a); }
+
+// Revisa las aristas de los triangulos cerca de cualquiera de los
+// `centers` (mismo arreglo {pt, signX} que ya arma applySculptStroke para
+// la Simetria X en vivo mientras se esculpe) y divide al medio las que
+// superen el largo objetivo para este `radius` de pincel. Divide por
+// ARISTA (no por triangulo) usando un mapa arista->vertice-nuevo, para que
+// los 1 o 2 triangulos que comparten esa arista usen SIEMPRE el mismo
+// vertice nuevo -- eso es lo que evita que aparezcan grietas/T-junctions
+// en el borde de la zona subdividida.
+function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
+  const posAttr = geo.attributes.position;
+  const uvAttr = geo.attributes.uv;
+  const index = geo.index;
+  if (!index) return false; // geometria no indexada (no deberia pasar con los kinds esculpibles)
+  const triCount = index.count / 3;
+  if (triCount >= DYNTOPO_MAX_TRIS) {
+    if (!entry._dyntopoCapWarned) {
+      entry._dyntopoCapWarned = true;
+      showToast('Esta figura llegó al límite de detalle del Esculpir', 'info');
+    }
+    return false;
+  }
+
+  const targetEdge = Math.max(radius / DYNTOPO_DETAIL_DIVISOR, 0.6);
+  const targetEdgeSq = targetEdge * targetEdge;
+  // Un poco mas alla del radio del pincel, para que el borde de la zona
+  // tocada tambien quede refinado (si no, se nota una costura entre lo
+  // subdividido y lo que no).
+  const searchRadiusSq = (radius * 1.4) * (radius * 1.4);
+
+  const posArr = posAttr.array;
+  const idxArr = index.array;
+
+  function nearAnyCenter(i) {
+    const x = posArr[i * 3], y = posArr[i * 3 + 1], z = posArr[i * 3 + 2];
+    for (let c = 0; c < centers.length; c++) {
+      const cp = centers[c].pt;
+      const dx = x - cp.x, dy = y - cp.y, dz = z - cp.z;
+      if (dx * dx + dy * dy + dz * dz <= searchRadiusSq) return true;
+    }
+    return false;
+  }
+  function edgeLenSq(p, q) {
+    const dx = posArr[p * 3] - posArr[q * 3], dy = posArr[p * 3 + 1] - posArr[q * 3 + 1], dz = posArr[p * 3 + 2] - posArr[q * 3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  }
+  function triAreaSq(a, b, c) {
+    const abx = posArr[b*3]-posArr[a*3], aby = posArr[b*3+1]-posArr[a*3+1], abz = posArr[b*3+2]-posArr[a*3+2];
+    const acx = posArr[c*3]-posArr[a*3], acy = posArr[c*3+1]-posArr[a*3+1], acz = posArr[c*3+2]-posArr[a*3+2];
+    const crx = aby*acz-abz*acy, cry = abz*acx-abx*acz, crz = abx*acy-aby*acx;
+    return crx*crx + cry*cry + crz*crz;
+  }
+
+  // Paso rapido, todo sobre los TypedArray originales (sin convertir nada
+  // a arreglos comunes todavia): si ningun triangulo cerca del pincel
+  // tiene una arista mas larga que el objetivo, no hay nada para hacer y
+  // se corta aca -- la inmensa mayoria de los cuadros de un trazo comun
+  // caen en este caso, asi que conviene no pagar el costo de reconstruir
+  // la geometria si no hace falta. De paso, se aprovecha este mismo
+  // recorrido para notar si algun triangulo YA quedo con area
+  // practicamente cero (por ejemplo por el relajado automatico de
+  // Empujar/Hundir/Pellizcar, que mueve vertices por su cuenta) -- si es
+  // asi, igual conviene seguir hasta abajo para que el filtro de limpieza
+  // lo saque, aunque no haya ninguna arista para subdividir.
+  const edgeMidVertex = new Map(); // "a_b" -> indice del vertice nuevo (se completa mas abajo)
+  let remainingBudget = DYNTOPO_MAX_TRIS - triCount;
+  let foundDegenerateNear = false;
+  for (let t = 0; t < triCount && remainingBudget > 0; t++) {
+    const a = idxArr[t * 3], b = idxArr[t * 3 + 1], c = idxArr[t * 3 + 2];
+    if (!nearAnyCenter(a) && !nearAnyCenter(b) && !nearAnyCenter(c)) continue;
+    if (!foundDegenerateNear && (a === b || b === c || c === a || triAreaSq(a, b, c) < 1e-9)) foundDegenerateNear = true;
+    const pairs = [[a, b], [b, c], [c, a]];
+    for (let k = 0; k < 3; k++) {
+      const p = pairs[k][0], q = pairs[k][1];
+      if (edgeLenSq(p, q) <= targetEdgeSq) continue;
+      const key = dynEdgeKey(p, q);
+      if (edgeMidVertex.has(key)) continue;
+      edgeMidVertex.set(key, -1); // se asigna el indice real recien abajo
+      remainingBudget--;
+    }
+  }
+  if (edgeMidVertex.size === 0 && !foundDegenerateNear) return false;
+
+  // Reci\u00e9n ac\u00e1 conviene pasar a arreglos comunes -- position/uv van a
+  // CRECER (un vertice nuevo por arista dividida).
+  const px = Array.from(posArr);
+  const uv = uvAttr ? Array.from(uvAttr.array) : null;
+  edgeMidVertex.forEach((_, key) => {
+    const sep = key.indexOf('_');
+    const p = +key.slice(0, sep), q = +key.slice(sep + 1);
+    const mIdx = px.length / 3;
+    px.push((posArr[p * 3] + posArr[q * 3]) / 2, (posArr[p * 3 + 1] + posArr[q * 3 + 1]) / 2, (posArr[p * 3 + 2] + posArr[q * 3 + 2]) / 2);
+    if (uv) uv.push((uvAttr.array[p * 2] + uvAttr.array[q * 2]) / 2, (uvAttr.array[p * 2 + 1] + uvAttr.array[q * 2 + 1]) / 2);
+    edgeMidVertex.set(key, mIdx);
+  });
+
+  // Reconstruir la lista de triangulos: cada triangulo original se
+  // reemplaza por 1, 2, 3 o 4 triangulos segun cuantas de sus 3 aristas
+  // tengan un vertice medio asignado (casos estandar de "subdivision
+  // adaptativa por arista" / refinamiento red-green, igual que usan los
+  // editores de terreno y las mallas de elementos finitos para evitar
+  // T-junctions).
+  const newIdx = [];
+  for (let t = 0; t < triCount; t++) {
+    const a = idxArr[t * 3], b = idxArr[t * 3 + 1], c = idxArr[t * 3 + 2];
+    const mAB = edgeMidVertex.get(dynEdgeKey(a, b));
+    const mBC = edgeMidVertex.get(dynEdgeKey(b, c));
+    const mCA = edgeMidVertex.get(dynEdgeKey(c, a));
+    const splitCount = (mAB != null ? 1 : 0) + (mBC != null ? 1 : 0) + (mCA != null ? 1 : 0);
+    if (splitCount === 0) {
+      newIdx.push(a, b, c);
+    } else if (splitCount === 3) {
+      // 1 triangulo -> 4 (subdivision completa, el caso clasico)
+      newIdx.push(a, mAB, mCA);
+      newIdx.push(mAB, b, mBC);
+      newIdx.push(mCA, mBC, c);
+      newIdx.push(mAB, mBC, mCA);
+    } else if (splitCount === 1) {
+      // 1 -> 2, cortando por la unica arista dividida (se abanica desde el
+      // vertice opuesto a esa arista, que no se mueve)
+      if (mAB != null) { newIdx.push(a, mAB, c); newIdx.push(mAB, b, c); }
+      else if (mBC != null) { newIdx.push(a, b, mBC); newIdx.push(a, mBC, c); }
+      else { newIdx.push(a, b, mCA); newIdx.push(mCA, b, c); }
+    } else {
+      // 1 -> 3, dos de las tres aristas divididas. IMPORTANTE: el abanico
+      // tiene que salir de uno de los dos PUNTOS MEDIOS nuevos, NUNCA del
+      // vertice que las dos aristas divididas comparten -- abanicar desde
+      // el vertice compartido genera una diagonal que conecta los otros
+      // dos vertices originales, y esos dos vertices son justo los
+      // extremos de una de las aristas que se querian partir (quedaba
+      // reconstruida sin querer, como una arista de mas compartida por 4
+      // triangulos en vez de 2 -- el bug real que aparecia como
+      // "T-junctions" en las pruebas). Abanicando desde un punto medio se
+      // evita el problema: ningun triangulo nuevo vuelve a conectar
+      // directamente los dos extremos de una arista partida.
+      if (mAB != null && mBC != null) {
+        newIdx.push(mAB, b, mBC); newIdx.push(mAB, mBC, c); newIdx.push(mAB, c, a);
+      } else if (mBC != null && mCA != null) {
+        newIdx.push(mBC, c, mCA); newIdx.push(mBC, mCA, a); newIdx.push(mBC, a, b);
+      } else {
+        newIdx.push(mCA, a, mAB); newIdx.push(mCA, mAB, b); newIdx.push(mCA, b, c);
+      }
+    }
+  }
+
+  // Red de seguridad final: insistir MUCHO con Pellizcar sobre el mismo
+  // punto (muchas pasadas, fuerza alta, sobre una malla ya densa) puede
+  // juntar 2 o 3 vertices casi en el mismo lugar -- si eso pasa justo
+  // donde se acaba de agregar un vertice nuevo, puede salir un triangulo
+  // de area practicamente cero. Sacarlos aca no deja agujeros visibles (un
+  // triangulo de area cero no ocupaba espacio para empezar) y evita que se
+  // acumulen triangulos "basura" en la figura.
+  const cleanIdx = [];
+  for (let t = 0; t < newIdx.length; t += 3) {
+    const a = newIdx[t], b = newIdx[t + 1], c = newIdx[t + 2];
+    if (a === b || b === c || c === a) continue;
+    const abx = px[b * 3] - px[a * 3], aby = px[b * 3 + 1] - px[a * 3 + 1], abz = px[b * 3 + 2] - px[a * 3 + 2];
+    const acx = px[c * 3] - px[a * 3], acy = px[c * 3 + 1] - px[a * 3 + 1], acz = px[c * 3 + 2] - px[a * 3 + 2];
+    const crx = aby * acz - abz * acy, cry = abz * acx - abx * acz, crz = abx * acy - aby * acx;
+    if (crx * crx + cry * cry + crz * crz < 1e-9) continue; // area practicamente cero
+    cleanIdx.push(a, b, c);
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(px, 3));
+  if (uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(cleanIdx);
+  adjacencyCache.delete(geo.uuid); // la topologia cambio -- la adyacencia vieja (para el pincel Suavizar) ya no sirve
+  return true;
 }
 
 function applySculptStroke(entry, localPoint, brush, size, strength) {
@@ -6245,7 +6566,16 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
     }
   }
 
-  posAttr.needsUpdate = true;
+  // Subdivision Dinamica (Dyntopo-lite, ver dyntopoSubdivideNearBrush mas
+  // arriba): solo tiene sentido para los pinceles que ESTIRAN la malla
+  // (Empujar/Hundir/Pellizcar) -- Suavizar/Aplanar no alargan ninguna
+  // arista, asi que revisarlos en cada trazo seria trabajo de mas sin
+  // ningun efecto.
+  if (brush !== 'smooth' && brush !== 'flatten') {
+    dyntopoSubdivideNearBrush(entry, geo, centers, radius);
+  }
+
+  geo.attributes.position.needsUpdate = true;
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   entry.sculpted = true;

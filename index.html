@@ -837,8 +837,22 @@
                 <input id="clonerRandomRotInput" type="range" min="0" max="180" step="1" value="0">
               </div>
               <div class="prop-row">
-                <label>Escala Aleatoria: <span id="clonerRandomScaleVal">0</span>%</label>
+                <label><span id="clonerScaleLabelText">Escala Aleatoria</span>: <span id="clonerRandomScaleVal">0</span>%</label>
                 <input id="clonerRandomScaleInput" type="range" min="0" max="90" step="1" value="0">
+              </div>
+              <!-- Escala Progresiva (sept. 2026): pedido de Andres despues de
+                   probar la Escala Aleatoria -- una rampa PAREJA (no al azar)
+                   de grande a chico entre copias, como el efector "Step"/
+                   "Plain" de Cinema4D o el nodo de escala por indice en el
+                   Array modifier / Geometry Nodes de Blender. Reusa el mismo
+                   slider de arriba como el RANGO de la rampa. -->
+              <div class="prop-row" id="clonerScaleProgressiveRow" style="flex-direction:row; align-items:center; gap:14px; flex-wrap:wrap;">
+                <label style="display:flex; align-items:center; gap:6px; margin:0; font-weight:normal;">
+                  <input id="clonerScaleProgressiveInput" type="checkbox"> 📈 Progresivo (no aleatorio)
+                </label>
+                <label id="clonerScaleInvertLabel" style="display:none; align-items:center; gap:6px; margin:0; font-weight:normal;">
+                  <input id="clonerScaleProgressiveInvertInput" type="checkbox"> ↔️ Invertir (chico → grande)
+                </label>
               </div>
             </div>
             <button id="clonerBakeBtn" class="context-btn" style="justify-content:center;">⚡ Convertir a Objetos Fijos</button>
