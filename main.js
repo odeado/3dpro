@@ -39,6 +39,24 @@ function showToast(message, type = 'info') {
 const wrap = document.getElementById('canvasWrap');
 const layerList = document.getElementById('layerList');
 const layerEmpty = document.getElementById('layerEmpty');
+const multiSelectToolbar = document.getElementById('multiSelectToolbar');
+const multiSelectCountEl = document.getElementById('multiSelectCount');
+const groupSelectedBtn = document.getElementById('groupSelectedBtn');
+const clearMultiSelectBtn = document.getElementById('clearMultiSelectBtn');
+if (groupSelectedBtn) {
+  groupSelectedBtn.addEventListener('click', () => {
+    const ids = Array.from(multiSelectedIds);
+    const groupId = createGroupFromIds(ids);
+    multiSelectedIds.clear();
+    if (groupId == null) { renderLayerList(); return; }
+    renderLayerList();
+    selectObject(groupId);
+    pushHistory();
+  });
+}
+if (clearMultiSelectBtn) {
+  clearMultiSelectBtn.addEventListener('click', () => { multiSelectedIds.clear(); renderLayerList(); });
+}
 const propsPanel = document.getElementById('propsPanel');
 const propsColor = document.getElementById('propsColor');
 const propsRoughness = document.getElementById('propsRoughness');
@@ -196,6 +214,20 @@ const sceneObjects = new Map(); // id -> { id, kind, mesh, visible }
 let objIdCounter = 1;
 let selectedId = null;
 let toolMode = 'translate'; // 'translate' | 'rotate' | 'scale' | 'sculpt'
+
+// Seleccion multiple en el panel de Objetos (checkboxes), aparte de
+// `selectedId` (la seleccion "de edicion", una sola figura a la vez) -- solo
+// sirve para juntar varias figuras sueltas en un Nulo nuevo de un solo toque
+// (ver createGroupFromIds() mas abajo). Pedido de Andres: "no tener tantos
+// simetria [separados]" -- agrupando primero varias figuras y aplicando
+// despues UNA Simetria/Clonador sobre el grupo entero (eso ya funciona,
+// ver deepCloneSubtree/mirrorEntrySubtreeInPlace).
+const multiSelectedIds = new Set();
+// Cache del id del Nulo compartido "Pelo" (ver getOrCreateHairGroup() mas
+// abajo) -- se resetea a null cada vez que se reconstruye la escena entera
+// (rebuildSceneFrom, deshacer/rehacer y guardar/abrir) para que se vuelva a
+// buscar por su marca `isHairGroup` en vez de arrastrar un id viejo.
+let hairGroupId = null;
 
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
@@ -4079,6 +4111,10 @@ tabBtns.forEach(btn => {
 
 function renderLayerList() {
   layerList.innerHTML = '';
+  // Poda ids que ya no existen (figura borrada, deshacer, etc.) antes de
+  // dibujar nada -- asi el contador de la barra de "Agrupar seleccionadas"
+  // nunca cuenta una figura fantasma.
+  Array.from(multiSelectedIds).forEach(id => { if (!sceneObjects.has(id)) multiSelectedIds.delete(id); });
   const items = Array.from(sceneObjects.values());
   layerEmpty.style.display = items.length ? 'none' : 'block';
   const selectedEntry = selectedId != null ? sceneObjects.get(selectedId) : null;
@@ -4097,6 +4133,30 @@ function renderLayerList() {
 
     const top = document.createElement('div');
     top.className = 'layer-top';
+
+    // Checkbox de seleccion multiple (independiente de tocar la fila, que
+    // sigue siendo la seleccion "de edicion" de siempre) -- pedido de
+    // Andres: marcar varias figuras sueltas (por ejemplo varios "Pelo") y
+    // agruparlas de un solo toque con el boton de la barra de arriba. Solo
+    // en filas de la RAIZ (sin padre): una fila ya agrupada (con sangria)
+    // tiene mucho menos ancho disponible -- agregar un control mas ahi
+    // dejaba el nombre practicamente ilegible (recortado a 1-2 letras). El
+    // caso real que pidio Andres (varios "Pelo"/figuras sueltas juntas) es
+    // siempre a nivel raiz; para regrupar algo que ya esta adentro de un
+    // grupo, primero se lo saca con 🔓 (que ya lo deja en la raiz).
+    if (entry.parentId == null) {
+      const checkBox = document.createElement('input');
+      checkBox.type = 'checkbox';
+      checkBox.className = 'layer-check';
+      checkBox.checked = multiSelectedIds.has(entry.id);
+      checkBox.title = 'Marcar para agrupar';
+      checkBox.addEventListener('click', (e) => { e.stopPropagation(); });
+      checkBox.addEventListener('change', () => {
+        if (checkBox.checked) multiSelectedIds.add(entry.id); else multiSelectedIds.delete(entry.id);
+        updateMultiSelectToolbar();
+      });
+      top.appendChild(checkBox);
+    }
 
     if (entry.kind === 'null') {
       const collapseBtn = document.createElement('button');
@@ -4208,6 +4268,60 @@ function renderLayerList() {
   }
 
   rootIds.forEach(renderRow);
+  updateMultiSelectToolbar();
+}
+
+// Muestra/oculta la barra "N seleccionadas · Agrupar seleccionadas" encima
+// del panel de Objetos, segun cuantos checkboxes de la lista estan marcados.
+function updateMultiSelectToolbar() {
+  if (!multiSelectToolbar) return;
+  const n = multiSelectedIds.size;
+  multiSelectToolbar.classList.toggle('visible', n > 0);
+  if (multiSelectCountEl) multiSelectCountEl.textContent = n === 1 ? '1 figura marcada' : (n + ' figuras marcadas');
+}
+
+// Arma un Nulo NUEVO y mete adentro, de una sola vez, todas las figuras de
+// `ids` (los checkboxes marcados) -- el atajo que pidio Andres para no tener
+// que agrupar de a una con 🔗 antes de poder aplicarles una sola Simetria o
+// Clonador encima. Si dos ids marcados ya estan en relacion padre/hijo (por
+// ejemplo, se marco un Grupo Y una figura que ya esta adentro de ese mismo
+// Grupo), se descarta el descendiente -- ya viaja con su ancestro, agregarlo
+// aparte lo sacaria de donde estaba sin necesidad.
+function createGroupFromIds(ids) {
+  const filtered = ids.filter(id => sceneObjects.has(id) && !ids.some(other => other !== id && isDescendantOf(id, other)));
+  if (!filtered.length) return null;
+
+  // Centrar el Nulo nuevo en el promedio de las figuras que se van a
+  // agrupar (no siempre en el origen del mundo) -- attach() recalcula la
+  // transformada LOCAL de cada hijo para conservar su posicion en el mundo,
+  // asi que mover el Nulo antes de attachear no mueve a ninguna de ellas;
+  // solo hace que el propio "mango" del grupo aparezca en un lugar util.
+  const center = new THREE.Vector3();
+  filtered.forEach(id => {
+    const child = sceneObjects.get(id);
+    const wp = new THREE.Vector3();
+    child.mesh.getWorldPosition(wp);
+    center.add(wp);
+  });
+  center.divideScalar(filtered.length);
+
+  const nullBuilt = buildObject('null', undefined, {});
+  nullBuilt.node.position.copy(center);
+  scene.add(nullBuilt.node);
+  const groupId = objIdCounter++;
+  nullBuilt.pickMesh.userData.ownerId = groupId;
+  sceneObjects.set(groupId, {
+    id: groupId, kind: 'null', mesh: nullBuilt.node, pickMesh: nullBuilt.pickMesh,
+    visible: true, parentId: null, sculpted: false, name: null, collapsed: false
+  });
+
+  filtered.forEach(id => {
+    const child = sceneObjects.get(id);
+    nullBuilt.node.attach(child.mesh);
+    child.parentId = groupId;
+  });
+
+  return groupId;
 }
 
 // --- Color del objeto seleccionado ---
@@ -4240,7 +4354,7 @@ function snapshotScene() {
 function snapshotEntry(e) {
     const s = {
       id: e.id, kind: e.kind, visible: e.visible, parentId: e.parentId != null ? e.parentId : null,
-      name: e.name || null, collapsed: !!e.collapsed,
+      name: e.name || null, collapsed: !!e.collapsed, isHairGroup: !!e.isHairGroup,
       px: e.mesh.position.x, py: e.mesh.position.y, pz: e.mesh.position.z,
       rx: e.mesh.rotation.x, ry: e.mesh.rotation.y, rz: e.mesh.rotation.z,
       sx: e.mesh.scale.x, sy: e.mesh.scale.y, sz: e.mesh.scale.z,
@@ -4419,7 +4533,7 @@ function buildEntryFromSnapshot(s) {
   const entry = {
     id: s.id, kind: s.kind, mesh: built.node, pickMesh: built.pickMesh,
     visible: s.visible, parentId: s.parentId != null ? s.parentId : null,
-    sculpted, name: s.name || null, collapsed: !!s.collapsed,
+    sculpted, name: s.name || null, collapsed: !!s.collapsed, isHairGroup: !!s.isHairGroup,
     textureDataUrl: s.textureDataUrl || null,
     textureAspect: s.textureAspect || null,
     decalExtrusion: s.decalExtrusion || null,
@@ -4505,6 +4619,12 @@ function rebuildSceneFrom(snap) {
   transform.detach();
   sceneObjects.forEach(e => { scene.remove(e.mesh); disposeEntry(e); });
   sceneObjects.clear();
+  // El cache del Nulo compartido de Pelo y las marcas de seleccion multiple
+  // apuntan a ids que van a dejar de existir en un instante -- se resetean
+  // aca para que, despues de reconstruir, getOrCreateHairGroup() vuelva a
+  // buscar por `isHairGroup` en vez de arrastrar un id de la escena vieja.
+  hairGroupId = null;
+  multiSelectedIds.clear();
   let maxId = 0;
   // Primera pasada: crear todo suelto (a nivel raiz) con su transform local
   // ya cargado.
@@ -5106,6 +5226,39 @@ function updateHairPreview() {
   }
 }
 
+// Busca, entre las figuras YA en la escena, el Nulo compartido de Pelo (el
+// que se marco con `isHairGroup` al crearlo) -- se usa cuando `hairGroupId`
+// todavia no tiene nada en cache (recien arrancada la app) o cuando la
+// escena se acaba de reconstruir entera (deshacer/rehacer, abrir un diseño
+// guardado) y el cache viejo puede no ser valido.
+function findExistingHairGroup() {
+  for (const [id, e] of sceneObjects) {
+    if (e.kind === 'null' && e.isHairGroup) return id;
+  }
+  return null;
+}
+
+// Devuelve el id del Nulo "Pelo" compartido, creandolo la primera vez que
+// hace falta -- pedido de Andres: que los mechones no queden todos sueltos
+// al mismo nivel en el panel de Objetos ("anarquia objeto"), sino juntos en
+// una sola capa, sin que el usuario tenga que agruparlos a mano.
+function getOrCreateHairGroup() {
+  if (hairGroupId != null && sceneObjects.has(hairGroupId)) return hairGroupId;
+  const existing = findExistingHairGroup();
+  if (existing != null) { hairGroupId = existing; return existing; }
+  const nullBuilt = buildObject('null', undefined, {});
+  scene.add(nullBuilt.node);
+  const id = objIdCounter++;
+  nullBuilt.pickMesh.userData.ownerId = id;
+  sceneObjects.set(id, {
+    id, kind: 'null', mesh: nullBuilt.node, pickMesh: nullBuilt.pickMesh,
+    visible: true, parentId: null, sculpted: false, name: 'Pelo', collapsed: false,
+    isHairGroup: true
+  });
+  hairGroupId = id;
+  return id;
+}
+
 function createHairObjectFromPoints(pts) {
   const origin = pts[0].clone();
   const localPoints = pts.map(p => p.clone().sub(origin));
@@ -5119,6 +5272,14 @@ function createHairObjectFromPoints(pts) {
   const id = objIdCounter++;
   mesh.userData.ownerId = id;
   sceneObjects.set(id, { id, kind: 'hair', mesh, pickMesh: mesh, visible: true, parentId: null, sculpted: false, name: null, collapsed: false });
+  // Meter el mechon recien creado adentro del Nulo compartido "Pelo" --
+  // attach() recalcula su transformada LOCAL para conservar la posicion en
+  // el mundo que ya tiene (la que le dio mesh.position.copy(origin) arriba),
+  // asi que esto no lo mueve ni un milimetro.
+  const groupId = getOrCreateHairGroup();
+  const groupEntry = sceneObjects.get(groupId);
+  groupEntry.mesh.attach(mesh);
+  sceneObjects.get(id).parentId = groupId;
   return id;
 }
 
