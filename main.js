@@ -228,6 +228,13 @@ const multiSelectedIds = new Set();
 // (rebuildSceneFrom, deshacer/rehacer y guardar/abrir) para que se vuelva a
 // buscar por su marca `isHairGroup` en vez de arrastrar un id viejo.
 let hairGroupId = null;
+// Arrastrar filas del panel de Objetos con el lapiz/dedo (agarre "⠿" en
+// Acciones, ver renderRow() mas abajo) -- pedido de Andres para reordenar y
+// re-agrupar sin tener que tocar 🔗/🔓/⬆️/⬇️ una por una. `rowDrag` guarda el
+// estado del arrastre en curso (null cuando no se esta arrastrando nada);
+// ver startRowDrag()/updateDragTarget()/finishRowDrag()/moveEntryTo() mas
+// abajo.
+let rowDrag = null;
 
 const KIND_LABEL = {
   cube: '🧊 Cubo', sphere: '⚪ Esfera', cylinder: '🥫 Cilindro',
@@ -4130,6 +4137,7 @@ function renderLayerList() {
     const row = document.createElement('div');
     row.className = 'layer-row' + (entry.id === selectedId ? ' active' : '') + (entry.kind === 'null' ? ' is-group' : '');
     row.style.marginLeft = (depthOf(entry) * 14) + 'px';
+    row.dataset.rowId = String(entry.id); // lo lee updateDragTarget() con elementFromPoint()
 
     const top = document.createElement('div');
     top.className = 'layer-top';
@@ -4210,6 +4218,21 @@ function renderLayerList() {
     // apretados en una sola linea de 220px.
     const actions = document.createElement('div');
     actions.className = 'layer-actions';
+
+    // Agarre para arrastrar la fila con el lapiz/dedo (reordenar o meter
+    // dentro de otro grupo) -- ver startRowDrag() mas abajo. Se pone en
+    // Acciones (no en layer-top, junto al nombre) para no repetir el
+    // apretujamiento de nombre que causo el checkbox de seleccion multiple
+    // en filas anidadas (ver comentario del checkbox mas arriba) -- una
+    // fila anidada ya tiene el nombre bastante mas ajustado, y sumar un
+    // control mas justo ahi lo dejaria ilegible otra vez.
+    const dragHandle = document.createElement('button');
+    dragHandle.className = 'layer-btn drag-handle';
+    dragHandle.textContent = '⠿';
+    dragHandle.title = 'Arrastrar para mover / reordenar';
+    dragHandle.addEventListener('click', (e) => e.stopPropagation());
+    dragHandle.addEventListener('pointerdown', (e) => startRowDrag(e, entry.id, dragHandle));
+    actions.appendChild(dragHandle);
 
     const upBtn = document.createElement('button');
     upBtn.className = 'layer-btn';
@@ -4322,6 +4345,144 @@ function createGroupFromIds(ids) {
   });
 
   return groupId;
+}
+
+// --- Arrastrar filas del panel de Objetos con el lapiz/dedo (ver el agarre
+// "⠿" en renderRow() mas arriba) --- Eventos de puntero crudos, NO el Drag
+// and Drop nativo de HTML (poco confiable con lapiz/touch entre
+// navegadores) -- mismo criterio que ya usan los tiradores directos de
+// Escalar (ver "Tiradores directos de redimensionar" en Nota tecnica).
+// Soltar sobre el tercio de arriba/abajo de otra fila reordena como
+// hermana (antes/despues); soltar sobre el tercio del medio de un Nulo
+// mete la figura DENTRO de ese grupo.
+function startRowDrag(e, id, handleEl) {
+  e.preventDefault();
+  e.stopPropagation();
+  handleEl.setPointerCapture(e.pointerId);
+  const row = layerList.querySelector('[data-row-id="' + id + '"]');
+  rowDrag = { id, pointerId: e.pointerId, overRow: null, zone: null };
+  if (row) row.classList.add('dragging');
+
+  const onMove = (ev) => {
+    if (!rowDrag || ev.pointerId !== rowDrag.pointerId) return;
+    updateDragTarget(ev.clientX, ev.clientY);
+  };
+  const onUp = (ev) => {
+    if (!rowDrag || ev.pointerId !== rowDrag.pointerId) return;
+    finishRowDrag();
+    handleEl.removeEventListener('pointermove', onMove);
+    handleEl.removeEventListener('pointerup', onUp);
+    handleEl.removeEventListener('pointercancel', onUp);
+  };
+  handleEl.addEventListener('pointermove', onMove);
+  handleEl.addEventListener('pointerup', onUp);
+  handleEl.addEventListener('pointercancel', onUp);
+}
+
+// Calcula, segun donde esta el puntero AHORA, sobre que fila esta y en que
+// "zona" de esa fila (before/after/into) -- y pinta el resaltado
+// correspondiente. `document.elementFromPoint` da el elemento real bajo el
+// puntero en pantalla (no se ve afectado por setPointerCapture, que solo
+// redirige a QUIEN le llegan los eventos, no lo que hay debajo del dedo).
+function updateDragTarget(clientX, clientY) {
+  if (!rowDrag) return;
+  clearDragHighlights();
+  const el = document.elementFromPoint(clientX, clientY);
+  const row = el ? el.closest('.layer-row') : null;
+  if (!row || !layerList.contains(row)) { rowDrag.overRow = null; rowDrag.zone = null; return; }
+  const overId = parseInt(row.dataset.rowId, 10);
+  if (overId === rowDrag.id || isDescendantOf(overId, rowDrag.id)) {
+    // no se puede soltar sobre si misma ni sobre su propia descendiente
+    // (meteria un grupo dentro de si mismo).
+    rowDrag.overRow = null; rowDrag.zone = null;
+    return;
+  }
+  const overEntry = sceneObjects.get(overId);
+  if (!overEntry) { rowDrag.overRow = null; rowDrag.zone = null; return; }
+  const rect = row.getBoundingClientRect();
+  const rel = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+  let zone;
+  if (overEntry.kind === 'null' && rel > 0.25 && rel < 0.75) {
+    zone = 'into';
+  } else {
+    zone = rel < 0.5 ? 'before' : 'after';
+  }
+  rowDrag.overRow = overId;
+  rowDrag.zone = zone;
+  row.classList.add(zone === 'into' ? 'drop-into' : (zone === 'before' ? 'drop-before' : 'drop-after'));
+}
+
+function clearDragHighlights() {
+  layerList.querySelectorAll('.drop-into, .drop-before, .drop-after').forEach(el => {
+    el.classList.remove('drop-into', 'drop-before', 'drop-after');
+  });
+}
+
+function finishRowDrag() {
+  const drag = rowDrag;
+  clearDragHighlights();
+  if (drag) {
+    const draggedRow = layerList.querySelector('[data-row-id="' + drag.id + '"]');
+    if (draggedRow) draggedRow.classList.remove('dragging');
+  }
+  rowDrag = null;
+  if (!drag || drag.overRow == null || drag.zone == null) return; // se solto afuera de cualquier lugar valido
+  const overEntry = sceneObjects.get(drag.overRow);
+  if (!overEntry) return;
+  if (drag.zone === 'into') {
+    moveEntryTo(drag.id, drag.overRow, null, false);
+  } else {
+    const newParentId = overEntry.parentId != null ? overEntry.parentId : null;
+    moveEntryTo(drag.id, newParentId, drag.overRow, drag.zone === 'before');
+  }
+  renderLayerList();
+  pushHistory();
+}
+
+// Reordena y/o re-empadra una figura para el arrastre de arriba.
+// `referenceId` es la fila junto a la que hay que quedar (null = como
+// ULTIMO hijo de newParentId, sin ninguna referencia puntual);
+// `insertBefore` decide si el resultado queda antes o despues de esa
+// referencia. El orden real de hermanos sale del orden de insercion del
+// Map `sceneObjects` (ver moveObject() mas arriba) -- para ubicar una
+// figura junto a una hermana puntual alcanza con reinsertar su llave en
+// esa posicion del Map COMPLETO, sin importar que otras figuras (de otros
+// padres) queden de por medio, porque el panel filtra por parentId antes
+// de mirar el orden.
+function moveEntryTo(id, newParentId, referenceId, insertBefore) {
+  const entry = sceneObjects.get(id);
+  if (!entry) return;
+  if (id === newParentId) return;
+  if (newParentId != null && isDescendantOf(newParentId, id)) return; // no meter un grupo dentro de si mismo
+
+  if (entry.parentId !== newParentId) {
+    // attach() conserva la posicion/rotacion/escala en el MUNDO al
+    // re-empadrar -- mismo criterio que groupInto()/ungroup() de arriba.
+    if (newParentId != null) {
+      const parent = sceneObjects.get(newParentId);
+      if (!parent) return;
+      parent.mesh.attach(entry.mesh);
+    } else {
+      scene.attach(entry.mesh);
+    }
+    entry.parentId = newParentId;
+  }
+
+  const ids = Array.from(sceneObjects.keys());
+  const fromIdx = ids.indexOf(id);
+  if (fromIdx === -1) return;
+  ids.splice(fromIdx, 1);
+
+  let insertIdx = ids.length; // por defecto, al final de todo
+  if (referenceId != null) {
+    const refIdx = ids.indexOf(referenceId);
+    if (refIdx !== -1) insertIdx = insertBefore ? refIdx : refIdx + 1;
+  }
+  ids.splice(insertIdx, 0, id);
+
+  const rebuilt = ids.map(k => [k, sceneObjects.get(k)]);
+  sceneObjects.clear();
+  rebuilt.forEach(([k, e]) => sceneObjects.set(k, e));
 }
 
 // --- Color del objeto seleccionado ---

@@ -179,15 +179,22 @@
   #layerEmpty { color: #5c6370; font-size: 12px; text-align: center; margin-top: 10px; }
 
   .layer-row {
-    display: flex; align-items: center; justify-content: space-between;
+    display: flex; flex-direction: column; align-items: stretch; gap: 4px;
     background: #282c34; border: 1px solid var(--border-color); border-radius: 4px;
     padding: 6px 8px; cursor: pointer; font-size: 12px; transition: border-color 0.15s ease;
   }
   .layer-row:hover { border-color: #4b5263; }
   .layer-row.active { border-color: var(--accent); background: #2c313a; }
-  .layer-top { display: flex; align-items: center; gap: 6px; flex: 1; overflow: hidden; }
+  /* Desde sept. 2026, layer-top y layer-actions van uno debajo del otro (fila
+     de columna), no uno al lado del otro compartiendo el mismo ancho -- con
+     el agarre de arrastre sumado a los botones de siempre, apretar todo en
+     una sola linea dejaba el nombre recortado a 1-2 letras incluso en filas
+     de la raiz (ver "Arrastrar filas..." en Nota tecnica). Asi el nombre
+     tiene SIEMPRE el ancho completo de la fila para el, sin importar cuantos
+     botones tenga la fila de acciones de abajo. */
+  .layer-top { display: flex; align-items: center; gap: 6px; overflow: hidden; }
   .layer-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #abb2bf; font-size: 12px; }
-  .layer-actions { display: flex; align-items: center; gap: 2px; }
+  .layer-actions { display: flex; align-items: center; gap: 2px; justify-content: flex-end; }
   .layer-btn { background: none; border: none; color: #5c6370; font-size: 12px; padding: 2px 4px; cursor: pointer; border-radius: 3px; }
   /* Medallitas junto al nombre en Objetos: que modificador tiene esta
      figura/grupo (Clonador o Simetria) a simple vista -- ver renderLayerList()
@@ -215,6 +222,14 @@
     padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
   }
   #clearMultiSelectBtn { background: none; border: none; color: #5c6370; font-size: 12px; cursor: pointer; text-decoration: underline; }
+  /* Arrastrar filas del panel de Objetos con el lapiz/dedo (agarre "⠿" en
+     Acciones) -- ver startRowDrag()/updateDragTarget()/moveEntryTo() en
+     main.js. Eventos de puntero crudos, no Drag and Drop nativo de HTML. */
+  .drag-handle { cursor: grab; touch-action: none; font-size: 13px; }
+  .layer-row.dragging { opacity: 0.35; }
+  .layer-row.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .layer-row.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+  .layer-row.drop-into { background: rgba(107, 184, 255, 0.18); outline: 1px dashed var(--accent); outline-offset: -1px; }
 
   .prop-group {
     background: #21252b; border: 1px solid var(--border-color); border-radius: 10px;
