@@ -3193,9 +3193,18 @@ function clonerChildScaleFactor(clonerEntry, child) {
     // t va de 0 (primera copia) a 1 (ultima copia); con una sola copia
     // (total 1) no hay "rampa" posible, se deja en el extremo grande.
     const t = total > 1 ? child.clonerCloneIndex / (total - 1) : 0;
-    const big = 1 + amt, small = 1 - amt;
-    const start = clonerEntry.scaleProgressiveInvert ? small : big;
-    const end = clonerEntry.scaleProgressiveInvert ? big : small;
+    // La rampa SIEMPRE ancla un extremo en 1 (el tamaño del original, que
+    // nunca se toca) en vez de ir de 1+amt a 1-amt -- si la primera copia
+    // pudiera superar al original, esa copia "grande" queda MAS grande que
+    // el original mismo; como la separacion entre copias es fija (no escala
+    // con el tamaño de cada una), esa copia se solapa hacia atras sobre el
+    // original y las dos se ven fundidas en un solo bloque "atascado" en la
+    // punta de la fila -- el bug que reporto Andres ("queda uno al medio").
+    // Anclando en 1, ninguna copia supera nunca al original: el rango pedido
+    // se aplica entero del lado de achicar.
+    const shrunk = Math.max(0.05, 1 - 2 * amt);
+    const start = clonerEntry.scaleProgressiveInvert ? shrunk : 1;
+    const end = clonerEntry.scaleProgressiveInvert ? 1 : shrunk;
     return start + (end - start) * t;
   }
   if (clonerEntry.randomSeed == null) return 1;
