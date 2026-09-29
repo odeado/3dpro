@@ -88,6 +88,9 @@ const toolbar = document.getElementById('toolbar');
 const brushRow = document.getElementById('brushRow');
 const brushSizeInput = document.getElementById('brushSize');
 const brushStrengthInput = document.getElementById('brushStrength');
+const brushSizeValueEl = document.getElementById('brushSizeValue');
+const brushStrengthValueEl = document.getElementById('brushStrengthValue');
+const densityBtn = document.getElementById('densityBtn');
 const hairRow = document.getElementById('hairRow');
 const hairRootRadiusInput = document.getElementById('hairRootRadius');
 const hairTipRadiusInput = document.getElementById('hairTipRadius');
@@ -5320,8 +5323,23 @@ function onPick(clientX, clientY) {
 // un mini-ZBrush) ---
 let brushType = 'push';
 let sculptDragging = false;
+// Empujar/Hundir "fijan" la direccion en el PRIMER dab de cada trazo (ver
+// applySculptStroke) en vez de recalcularla en cada dab a partir de la
+// normal EN VIVO de cada vertice -- null significa "todavia no se fijo
+// ninguna para este trazo", se recalcula en el primer dab y se limpia al
+// soltar (pointerup) o empezar un trazo nuevo (pointerdown).
+let sculptStrokeNormal = null;
+// Ultimo punto de contacto del trazo actual, en espacio LOCAL de la figura
+// -- lo usa el pincel Arrastrar (ver applySculptStroke) para saber hacia
+// donde se movio el lapiz desde el dab anterior. null significa "todavia
+// no hay uno para este trazo" (recien empezo, o se solto el puntero).
+let sculptLastDragPoint = null;
 let pendingSculptPoint = null; // ultimo toque recibido, se aplica una vez por frame
 const adjacencyCache = new Map(); // geometry.uuid -> lista de vecinos por vertice (para el pincel de Suavizar)
+// geometry.uuid -> Int32Array "indice de vertice -> indice MAESTRO de su
+// grupo" para vertices que ocupan el MISMO lugar en la malla ORIGINAL (sin
+// esculpir todavia) -- ver getWeldMasterOf() y su uso en applySculptStroke.
+const weldGroupsCache = new Map();
 
 function getPointerRayContext(clientX, clientY) {
   if (fourViewMode) {
@@ -6528,6 +6546,52 @@ function getAdjacency(geometry) {
   return adj;
 }
 
+// THREE.SphereGeometry (y cualquier geometria con costura de UV) duplica a
+// PROPOSITO los vertices del polo y de la costura: varios indices distintos
+// que ocupan el MISMO lugar, para poder pintar UV distinta a cada lado. Se
+// calcula UNA sola vez por figura (la primera vez que se esculpe, cuando la
+// malla todavia esta en su forma original sin tocar) que grupos de indices
+// comparten lugar, y se cachea -- esto se usa despues de cada trazo para
+// "volver a pegar" esos grupos si el esculpido los separo (ver
+// applySculptStroke), evitando que se abra una grieta ahi.
+function getWeldMasterOf(geo) {
+  let masterOf = weldGroupsCache.get(geo.uuid);
+  if (masterOf) return masterOf;
+  const pos = geo.attributes.position;
+  const count = pos.count;
+  masterOf = new Int32Array(count);
+  const posToMaster = new Map();
+  for (let v = 0; v < count; v++) {
+    const key = Math.round(pos.getX(v) * 1000) + '_' + Math.round(pos.getY(v) * 1000) + '_' + Math.round(pos.getZ(v) * 1000);
+    let m = posToMaster.get(key);
+    if (m === undefined) { m = v; posToMaster.set(key, m); }
+    masterOf[v] = m;
+  }
+  weldGroupsCache.set(geo.uuid, masterOf);
+  return masterOf;
+}
+
+// Vuelve a pegar en el mismo lugar exacto cualquier grupo de vertices
+// "duplicados a proposito" (ver getWeldMasterOf) que el trazo de escultura
+// haya separado -- Empujar/Hundir/Pellizcar/Suavizar/Aplanar mueven cada
+// vertice segun SU PROPIA posicion/vecinos, y dos indices que arrancaron en
+// el mismo lugar (polo de una esfera, costura de UV) pueden terminar en
+// lugares apenas distintos despues de un trazo (mas notorio todavia con el
+// relajado automatico, que promedia vecinos DISTINTOS para cada copia). Si
+// eso pasa, la Subdivision Dinamica ya no los reconoce como "la misma
+// arista" y puede dejar una grieta -- pegarlos de nuevo aca, antes de
+// subdividir, lo evita de raiz.
+function weldDuplicatePositions(geo) {
+  const masterOf = getWeldMasterOf(geo);
+  const pos = geo.attributes.position;
+  const n = masterOf.length;
+  for (let v = 0; v < n; v++) {
+    const m = masterOf[v];
+    if (m === v) continue;
+    pos.setXYZ(v, pos.getX(m), pos.getY(m), pos.getZ(m));
+  }
+}
+
 function syncSymmetryMirrorsFor(srcId) {
   const srcEntry = sceneObjects.get(srcId);
   if (!srcEntry || !srcEntry.mesh || !srcEntry.mesh.geometry) return;
@@ -6620,6 +6684,35 @@ function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
   const posArr = posAttr.array;
   const idxArr = index.array;
 
+  // Canonicalizar por POSICION: en el polo de una esfera (y en cualquier
+  // costura de UV) THREE.SphereGeometry crea VARIOS indices de vertice
+  // distintos en el MISMO lugar (una copia "privada" por triangulo-abanico,
+  // para poder pintar UV distinta a cada lado del polo). dynEdgeKey por
+  // INDICE CRUDO no se da cuenta de que dos aristas son "la misma arista
+  // real" cuando los dos triangulos que la tocan usan cada uno su propia
+  // copia del vertice del polo -- eso generaba un vertice-medio DISTINTO
+  // para cada lado de la misma arista real, dejando una grieta angosta
+  // justo ahi, ya en la primerisima subdivision cerca del polo (el "se
+  // rompe mucho" que reporto Andres, sept. 2026). Se arregla canonicalizando
+  // por posicion antes de armar la clave de arista: dos indices que ocupan
+  // el mismo lugar comparten una sola clave => comparten el mismo vertice
+  // medio, y la grieta no llega a abrirse.
+  const vertCount = posArr.length / 3;
+  const canonOf = new Int32Array(vertCount);
+  {
+    const posToCanon = new Map();
+    for (let v = 0; v < vertCount; v++) {
+      const key = Math.round(posArr[v*3]*1000) + '_' + Math.round(posArr[v*3+1]*1000) + '_' + Math.round(posArr[v*3+2]*1000);
+      let c = posToCanon.get(key);
+      if (c === undefined) { c = v; posToCanon.set(key, c); }
+      canonOf[v] = c;
+    }
+  }
+  function dynEdgeKeyPos(p, q) {
+    const cp = canonOf[p], cq = canonOf[q];
+    return cp < cq ? (cp + '_' + cq) : (cq + '_' + cp);
+  }
+
   function nearAnyCenter(i) {
     const x = posArr[i * 3], y = posArr[i * 3 + 1], z = posArr[i * 3 + 2];
     for (let c = 0; c < centers.length; c++) {
@@ -6662,7 +6755,7 @@ function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
     for (let k = 0; k < 3; k++) {
       const p = pairs[k][0], q = pairs[k][1];
       if (edgeLenSq(p, q) <= targetEdgeSq) continue;
-      const key = dynEdgeKey(p, q);
+      const key = dynEdgeKeyPos(p, q);
       if (edgeMidVertex.has(key)) continue;
       edgeMidVertex.set(key, -1); // se asigna el indice real recien abajo
       remainingBudget--;
@@ -6692,9 +6785,9 @@ function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
   const newIdx = [];
   for (let t = 0; t < triCount; t++) {
     const a = idxArr[t * 3], b = idxArr[t * 3 + 1], c = idxArr[t * 3 + 2];
-    const mAB = edgeMidVertex.get(dynEdgeKey(a, b));
-    const mBC = edgeMidVertex.get(dynEdgeKey(b, c));
-    const mCA = edgeMidVertex.get(dynEdgeKey(c, a));
+    const mAB = edgeMidVertex.get(dynEdgeKeyPos(a, b));
+    const mBC = edgeMidVertex.get(dynEdgeKeyPos(b, c));
+    const mCA = edgeMidVertex.get(dynEdgeKeyPos(c, a));
     const splitCount = (mAB != null ? 1 : 0) + (mBC != null ? 1 : 0) + (mCA != null ? 1 : 0);
     if (splitCount === 0) {
       newIdx.push(a, b, c);
@@ -6732,21 +6825,57 @@ function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
     }
   }
 
-  // Red de seguridad final: insistir MUCHO con Pellizcar sobre el mismo
-  // punto (muchas pasadas, fuerza alta, sobre una malla ya densa) puede
-  // juntar 2 o 3 vertices casi en el mismo lugar -- si eso pasa justo
-  // donde se acaba de agregar un vertice nuevo, puede salir un triangulo
-  // de area practicamente cero. Sacarlos aca no deja agujeros visibles (un
-  // triangulo de area cero no ocupaba espacio para empezar) y evita que se
-  // acumulen triangulos "basura" en la figura.
+  // Red de seguridad final: insistir MUCHO con Pellizcar/Empujar sobre el
+  // mismo punto (muchas pasadas, fuerza alta, sobre una malla ya densa)
+  // puede juntar 2 o 3 vertices casi en el mismo lugar -- si eso pasa justo
+  // donde se acaba de agregar un vertice nuevo, puede salir un triangulo de
+  // area practicamente cero.
+  //
+  // OJO (bug real, reportado por Andres como "se rompe mucho" / un agujero
+  // visible en la punta de una oreja tirada muy fuerte, sept. 2026): el
+  // razonamiento original de "sacarlos aca no deja agujeros visibles,
+  // porque un triangulo de area cero no ocupaba espacio" es FALSO en
+  // general -- un triangulo casi-degenerado SIGUE compartiendo sus 3
+  // aristas con sus vecinos normales, y sacarlo le resta un usuario a esas
+  // aristas; si alguna de esas aristas solo tenia 2 triangulos en total (el
+  // degenerado + 1 vecino real), sacar el degenerado deja esa arista con UN
+  // solo triangulo -- una grieta real, no solo un defecto cosmetico. Esto
+  // es justo lo que mas facil pasa en la punta de una figura estirada mucho
+  // (el lugar donde la malla ya esta mas retorcida y con mas triangulos
+  // casi-planos). Un chequeo con Playwright confirmo esto de forma directa:
+  // agrupando vertices por POSICION (para no confundir la costura de UV de
+  // una esfera, que duplica vertices a proposito, con una grieta de
+  // verdad), una esfera sin tocar da 0 aristas usadas una sola vez, pero
+  // despues de tirar fuerte de un solo punto aparecian ~400 aristas
+  // colgantes, TODAS concentradas a menos de 15mm de la punta esculpida.
+  //
+  // Arreglo: antes de decidir, se cuenta cuantos triangulos usa cada arista
+  // en TODO `newIdx` (no solo mirando el propio triangulo degenerado). Un
+  // triangulo casi-degenerado solo se saca si NINGUNA de sus 3 aristas
+  // quedaria con un solo usuario al sacarlo -- si sacarlo abriria una
+  // grieta, se prefiere dejarlo puesto (invisible, area ~0, no rompe nada)
+  // antes que abrir un agujero de verdad.
+  function edgeKeyIdx(p, q) { return p < q ? (p + '_' + q) : (q + '_' + p); }
+  const edgeUseCount = new Map();
+  for (let t = 0; t < newIdx.length; t += 3) {
+    const a = newIdx[t], b = newIdx[t + 1], c = newIdx[t + 2];
+    [[a, b], [b, c], [c, a]].forEach(([p, q]) => {
+      if (p === q) return; // arista degenerada en si misma (vertices repetidos): no es una arista real
+      const key = edgeKeyIdx(p, q);
+      edgeUseCount.set(key, (edgeUseCount.get(key) || 0) + 1);
+    });
+  }
   const cleanIdx = [];
   for (let t = 0; t < newIdx.length; t += 3) {
     const a = newIdx[t], b = newIdx[t + 1], c = newIdx[t + 2];
-    if (a === b || b === c || c === a) continue;
+    if (a === b || b === c || c === a) continue; // sin aristas reales -- sacarlo nunca deja nada colgando
     const abx = px[b * 3] - px[a * 3], aby = px[b * 3 + 1] - px[a * 3 + 1], abz = px[b * 3 + 2] - px[a * 3 + 2];
     const acx = px[c * 3] - px[a * 3], acy = px[c * 3 + 1] - px[a * 3 + 1], acz = px[c * 3 + 2] - px[a * 3 + 2];
     const crx = aby * acz - abz * acy, cry = abz * acx - abx * acz, crz = abx * acy - aby * acx;
-    if (crx * crx + cry * cry + crz * crz < 1e-9) continue; // area practicamente cero
+    if (crx * crx + cry * cry + crz * crz < 1e-9) {
+      const wouldCrack = [[a, b], [b, c], [c, a]].some(([p, q]) => (edgeUseCount.get(edgeKeyIdx(p, q)) || 0) <= 1);
+      if (!wouldCrack) continue; // area casi nula Y seguro sacarlo -- afuera
+    }
     cleanIdx.push(a, b, c);
   }
 
@@ -6754,6 +6883,120 @@ function dyntopoSubdivideNearBrush(entry, geo, centers, radius) {
   if (uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   geo.setIndex(cleanIdx);
   adjacencyCache.delete(geo.uuid); // la topologia cambio -- la adyacencia vieja (para el pincel Suavizar) ya no sirve
+  return true;
+}
+
+// Relajado automatico compartido (ver applySculptStroke): se separo a una
+// funcion aparte para que los pinceles que "estiran" la malla -- Empujar/
+// Hundir/Pellizcar/Inflar/Arrastrar/Arcilla -- puedan reusarlo todos, en
+// vez de que solo el bloque de Empujar/Hundir lo tuviera.
+function applySculptAutoRelax(geo, posAttr, touchedFalloff, count, amountMul) {
+  const RELAX_AMOUNT = 0.18 * (amountMul || 1);
+  const adj = getAdjacency(geo);
+  const afterStroke = posAttr.array.slice();
+  for (let i = 0; i < count; i++) {
+    const w = touchedFalloff[i];
+    if (w <= 0) continue;
+    const neighbors = adj[i];
+    if (!neighbors || neighbors.size === 0) continue;
+    let ax = 0, ay = 0, az = 0;
+    neighbors.forEach(n => { ax += afterStroke[n * 3]; ay += afterStroke[n * 3 + 1]; az += afterStroke[n * 3 + 2]; });
+    const cnt = neighbors.size;
+    ax /= cnt; ay /= cnt; az /= cnt;
+    const vx = afterStroke[i * 3], vy = afterStroke[i * 3 + 1], vz = afterStroke[i * 3 + 2];
+    const k = w * RELAX_AMOUNT;
+    posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
+  }
+}
+
+// Subdivide TODA la malla seleccionada una vez (cada triangulo -> 4), sin
+// importar donde este el pincel -- el boton "+ Densidad Malla" que pidio
+// Andres viendo Nomad Sculpt, sept. 2026. A diferencia de la Subdivision
+// Dinamica automatica (dyntopoSubdivideNearBrush, que solo refina CERCA de
+// donde se esta esculpiendo en ese momento), esto se usa ANTES de esculpir,
+// para dejar mas malla disponible en TODA la figura de una sola vez (por
+// ejemplo, antes de intentar estirar una oreja bien fina y larga).
+function subdivideMeshUniform(entry) {
+  const geo = entry.mesh.geometry;
+  const index = geo.index;
+  if (!index) return false; // geometria no indexada (no deberia pasar con los kinds esculpibles)
+  const triCount = index.count / 3;
+  if (triCount * 4 > DYNTOPO_MAX_TRIS) {
+    showToast('Esta figura ya está cerca del límite de detalle del Esculpir', 'info');
+    return false;
+  }
+
+  const posAttr = geo.attributes.position;
+  const uvAttr = geo.attributes.uv;
+  const idxArr = index.array;
+  const posArr = posAttr.array;
+
+  // Misma canonicalizacion por POSICION que dyntopoSubdivideNearBrush (ver
+  // el comentario largo ahi): evita que el polo/costura de UV de una
+  // esfera -- vertices DISTINTOS que ocupan el MISMO lugar -- terminen con
+  // dos vertices-medio distintos para lo que es, en el espacio, la misma
+  // arista real (eso es justo lo que dejaba una grieta angosta apenas se
+  // subdividia cerca del polo).
+  const vertCount = posArr.length / 3;
+  const canonOf = new Int32Array(vertCount);
+  {
+    const posToCanon = new Map();
+    for (let v = 0; v < vertCount; v++) {
+      const key = Math.round(posArr[v * 3] * 1000) + '_' + Math.round(posArr[v * 3 + 1] * 1000) + '_' + Math.round(posArr[v * 3 + 2] * 1000);
+      let c = posToCanon.get(key);
+      if (c === undefined) { c = v; posToCanon.set(key, c); }
+      canonOf[v] = c;
+    }
+  }
+  function edgeKey(p, q) {
+    const cp = canonOf[p], cq = canonOf[q];
+    return cp < cq ? (cp + '_' + cq) : (cq + '_' + cp);
+  }
+
+  // Acá se subdivide CADA arista (a diferencia de dyntopoSubdivideNearBrush,
+  // que solo subdivide las que superan un largo objetivo), asi que cada
+  // triangulo original siempre termina en el caso clasico 1 -> 4 -- no hace
+  // falta el manejo especial de 1->2/1->3 de la version adaptativa.
+  const px = Array.from(posArr);
+  const uv = uvAttr ? Array.from(uvAttr.array) : null;
+  const edgeMidVertex = new Map();
+  for (let t = 0; t < triCount; t++) {
+    const a = idxArr[t * 3], b = idxArr[t * 3 + 1], c = idxArr[t * 3 + 2];
+    [[a, b], [b, c], [c, a]].forEach(([p, q]) => {
+      const key = edgeKey(p, q);
+      if (edgeMidVertex.has(key)) return;
+      const mIdx = px.length / 3;
+      px.push((posArr[p * 3] + posArr[q * 3]) / 2, (posArr[p * 3 + 1] + posArr[q * 3 + 1]) / 2, (posArr[p * 3 + 2] + posArr[q * 3 + 2]) / 2);
+      if (uv) uv.push((uvAttr.array[p * 2] + uvAttr.array[q * 2]) / 2, (uvAttr.array[p * 2 + 1] + uvAttr.array[q * 2 + 1]) / 2);
+      edgeMidVertex.set(key, mIdx);
+    });
+  }
+
+  const newIdx = [];
+  for (let t = 0; t < triCount; t++) {
+    const a = idxArr[t * 3], b = idxArr[t * 3 + 1], c = idxArr[t * 3 + 2];
+    const mAB = edgeMidVertex.get(edgeKey(a, b));
+    const mBC = edgeMidVertex.get(edgeKey(b, c));
+    const mCA = edgeMidVertex.get(edgeKey(c, a));
+    newIdx.push(a, mAB, mCA);
+    newIdx.push(mAB, b, mBC);
+    newIdx.push(mCA, mBC, c);
+    newIdx.push(mAB, mBC, mCA);
+  }
+
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(px, 3));
+  if (uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(newIdx);
+  adjacencyCache.delete(geo.uuid); // la topologia cambio -- la adyacencia vieja (Suavizar/relajado) ya no sirve
+  // OJO: weldGroupsCache NO se borra a proposito -- los vertices
+  // ORIGINALES quedan en los mismos indices/lugares de siempre (solo se
+  // agregaron vertices nuevos al final), asi que los grupos ya calculados
+  // siguen valiendo (ver getWeldMasterOf).
+  weldDuplicatePositions(geo);
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  entry.sculpted = true;
+  syncSymmetryMirrorsFor(entry.id);
   return true;
 }
 
@@ -6768,6 +7011,45 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
   const normAttr = geo.attributes.normal;
   const radius = size;
   const count = posAttr.count;
+
+  // Empujar/Hundir/Arcilla usan una direccion FIJA para TODO el trazo (ver
+  // sculptStrokeNormal mas arriba) en vez de la normal EN VIVO de cada
+  // vertice -- se calcula una sola vez, en el primer dab del trazo,
+  // promediando las normales bajo el pincel en ESE momento (antes de que
+  // el pincel mismo empiece a deformar la zona). Bug real reportado por
+  // Andres ("se rompe mucho", un agujero oscuro o una bifurcacion en la
+  // punta de una figura estirada mucho, sept. 2026): reusar la normal EN
+  // VIVO de cada vertice en cada dab hace que, apenas la punta empieza a
+  // alargarse, esa normal se vuelva inestable (casi paralela a la
+  // superficie, o de plano invertida si la malla se pliega apenas un poco
+  // sobre si misma) -- el siguiente dab entonces empuja para cualquier
+  // lado en vez de seguir estirando en linea recta, lo que abre la punta
+  // en 2 (bifurcacion) o la dobla sobre si misma (normal invertida = se ve
+  // la cara de ADENTRO de la malla, sin luz directa = una mancha oscura
+  // que parece un agujero, aunque la malla siga cerrada). Fijar la
+  // direccion en el primer dab (cuando la superficie todavia es la
+  // original, sin distorsionar) y reusarla evita esa realimentacion,
+  // igual que el brush "estandar" de Blender/ZBrush. Inflar y Arrastrar NO
+  // entran aca a proposito: Inflar quiere seguir la forma actual en cada
+  // dab (infla TODA la zona pareja, no estira un solo punto, asi que no
+  // sufre el mismo problema) y Arrastrar usa la diferencia entre dabs, no
+  // una normal.
+  if ((brush === 'push' || brush === 'pull' || brush === 'clay') && !sculptStrokeNormal) {
+    let anx = 0, any = 0, anz = 0, acnt = 0;
+    const c0 = centers[0].pt;
+    if (normAttr) {
+      for (let i = 0; i < count; i++) {
+        const dx = posAttr.getX(i) - c0.x, dy = posAttr.getY(i) - c0.y, dz = posAttr.getZ(i) - c0.z;
+        if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+        anx += normAttr.getX(i); any += normAttr.getY(i); anz += normAttr.getZ(i);
+        acnt++;
+      }
+    }
+    const alen = Math.sqrt(anx * anx + any * any + anz * anz);
+    sculptStrokeNormal = (acnt > 0 && alen > 1e-6)
+      ? new THREE.Vector3(anx / alen, any / alen, anz / alen)
+      : new THREE.Vector3(0, 1, 0); // nada bajo el pincel (caso raro) -- direccion de respaldo
+  }
 
   if (brush === 'smooth') {
     const adj = getAdjacency(geo);
@@ -6821,8 +7103,64 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
         }
       }
     });
+  } else if (brush === 'clay') {
+    // Arcilla (Clay Buildup, pedido por Andres viendo Nomad Sculpt, sept.
+    // 2026): como Aplanar, pero en vez de emparejar hacia el plano
+    // PROMEDIO actual de la zona, junta material hacia un plano CORRIDO
+    // una distancia fija en la direccion FIJA del trazo (sculptStrokeNormal,
+    // igual que Empujar/Hundir) -- asi "amontona" una capa pareja en vez de
+    // solo estirar un pico, el efecto clasico de esta herramienta en
+    // ZBrush/Nomad. Usa el mismo relajado automatico que Empujar/Hundir
+    // (ver applySculptAutoRelax) porque tambien puede estirar la malla.
+    const origPos = posAttr.array.slice();
+    const touchedFalloff = new Float32Array(count);
+    const OFFSET = radius * 0.35; // cuanto se "amontona" por encima del promedio
+    centers.forEach(c => {
+      let avgX = 0, avgY = 0, avgZ = 0, cnt = 0;
+      for (let i = 0; i < count; i++) {
+        const dx = origPos[i * 3] - c.pt.x, dy = origPos[i * 3 + 1] - c.pt.y, dz = origPos[i * 3 + 2] - c.pt.z;
+        if (dx * dx + dy * dy + dz * dz <= radius * radius) {
+          avgX += origPos[i * 3]; avgY += origPos[i * 3 + 1]; avgZ += origPos[i * 3 + 2]; cnt++;
+        }
+      }
+      if (cnt === 0) return;
+      avgX /= cnt; avgY /= cnt; avgZ /= cnt;
+      const nx = sculptStrokeNormal.x * c.signX, ny = sculptStrokeNormal.y, nz = sculptStrokeNormal.z;
+      const planeX = avgX + nx * OFFSET, planeY = avgY + ny * OFFSET, planeZ = avgZ + nz * OFFSET;
+      for (let i = 0; i < count; i++) {
+        const vx = origPos[i * 3], vy = origPos[i * 3 + 1], vz = origPos[i * 3 + 2];
+        const dx = vx - c.pt.x, dy = vy - c.pt.y, dz = vz - c.pt.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > radius) continue;
+        const t = 1 - dist / radius;
+        const falloff = t * t * (3 - 2 * t);
+        const distToPlane = (vx - planeX) * nx + (vy - planeY) * ny + (vz - planeZ) * nz;
+        const k = falloff * strength * 0.35;
+        // A diferencia de Empujar/Hundir (paso FIJO por dab, acotado por
+        // falloff*strength), este paso es proporcional a distToPlane, que
+        // puede ser grande si el vertice quedo lejos del plano (por
+        // ejemplo, la zona tocada quedo dispareja tras varios dabs
+        // seguidos) -- sin un tope, un paso grande de golpe puede estirar
+        // demasiado una arista respecto de sus vecinas y dejar una grieta
+        // en la Subdivision Dinamica. Se limita el paso maximo por dab
+        // (proporcional al tamano del pincel), igual de eficaz para
+        // "amontonar" en varios dabs seguidos pero sin el salto brusco.
+        const maxStep = radius * 0.08;
+        const step = Math.max(-maxStep, Math.min(maxStep, distToPlane * k));
+        posAttr.setXYZ(i, vx - nx * step, vy - ny * step, vz - nz * step);
+        if (falloff > touchedFalloff[i]) touchedFalloff[i] = falloff;
+      }
+    });
+    // Arcilla relaja un poco MAS fuerte que Empujar/Hundir/Arrastrar (2x):
+    // el paso de cada vertice depende de que tan lejos este del plano, asi
+    // que dos vertices vecinos pueden recibir empujones bastante distintos
+    // en el mismo dab (a diferencia del paso PAREJO de Empujar/Hundir) --
+    // el relajado extra ayuda a que esa diferencia no deje la malla
+    // demasiado dispareja para la Subdivision Dinamica de mas abajo.
+    applySculptAutoRelax(geo, posAttr, touchedFalloff, count, 3);
   } else {
     const origPos = posAttr.array.slice();
+    const origNorm = normAttr ? normAttr.array.slice() : null;
     // Guarda, por vertice, cuanto "peso" (falloff) le toco en este trazo --
     // se reusa abajo para la pasada de relajado, en vez de recalcularlo.
     const touchedFalloff = new Float32Array(count);
@@ -6842,10 +7180,42 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
           totalDx += (c.pt.x - vx) * k;
           totalDy += (c.pt.y - vy) * k;
           totalDz += (c.pt.z - vz) * k;
+        } else if (brush === 'inflate') {
+          // Inflar: cada vertice se infla a lo largo de SU PROPIA normal
+          // actual (recalculada al principio de este dab), no de una
+          // direccion fija de trazo -- a diferencia de Empujar/Hundir,
+          // Inflar mueve TODA la zona tocada pareja hacia afuera de su
+          // propia forma, como un globo, en vez de estirar un solo punto,
+          // asi que no sufre la misma inestabilidad y puede seguir la
+          // normal en vivo sin problema.
+          if (origNorm) {
+            const k = falloff * strength * 0.5;
+            totalDx += origNorm[i * 3] * k;
+            totalDy += origNorm[i * 3 + 1] * k;
+            totalDz += origNorm[i * 3 + 2] * k;
+          }
+        } else if (brush === 'drag') {
+          // Arrastrar: desliza la superficie tocada segun hacia donde se
+          // movio el lapiz desde el dab anterior (sculptLastDragPoint,
+          // ver mas arriba) -- como correr arcilla de costado con el
+          // dedo, no como inflarla/hundirla. El PRIMER dab de cada trazo
+          // no mueve nada (todavia no hay "hacia donde" moverse).
+          if (sculptLastDragPoint) {
+            const ddx = (c.pt.x - sculptLastDragPoint.x) * c.signX;
+            const ddy = c.pt.y - sculptLastDragPoint.y;
+            const ddz = c.pt.z - sculptLastDragPoint.z;
+            const k = falloff * strength * 0.15;
+            totalDx += ddx * k;
+            totalDy += ddy * k;
+            totalDz += ddz * k;
+          }
         } else {
-          const nx = normAttr ? normAttr.getX(i) : 0;
-          const ny = normAttr ? normAttr.getY(i) : 1;
-          const nz = normAttr ? normAttr.getZ(i) : 0;
+          // Direccion FIJA del trazo (ver arriba) -- espejada en X para el
+          // centro de Simetria en vivo (signX === -1), igual que ya se
+          // espeja el propio punto de contacto mas arriba.
+          const nx = sculptStrokeNormal.x * c.signX;
+          const ny = sculptStrokeNormal.y;
+          const nz = sculptStrokeNormal.z;
           const dir = brush === 'pull' ? -1 : 1;
           const k = falloff * strength * 0.6 * dir;
           totalDx += nx * k;
@@ -6861,41 +7231,28 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
 
     // Relajado automatico (reporte de Andres: "se rompe si modificas
     // mucho, no tienen que seguir las mallas rellenandose?"): esta app no
-    // tiene subdivision dinamica -- Empujar/Hundir/Pellizcar solo MUEVEN
-    // los vertices que ya existen, nunca agregan mas malla. Estirar una
-    // zona chica muy lejos de su forma original (una "oreja" arrastrando
-    // el lapiz, o pasando muchas veces por el mismo lugar) hace que esos
+    // tiene subdivision dinamica de verdad para todos los casos -- varios
+    // pinceles solo MUEVEN los vertices que ya existen. Estirar una zona
+    // chica muy lejos de su forma original (una "oreja" arrastrando el
+    // lapiz, o pasando muchas veces por el mismo lugar) hace que esos
     // pocos vertices formen triangulos cada vez mas finos y estirados
     // respecto de sus vecinos que quedaron atras sin moverse -- en algun
     // punto se pliegan sobre si mismos o sobre el resto de la figura, lo
     // que se ve como una "aleta" rota o un hueco (no es un agujero de
     // verdad, es la propia malla doblada mostrando su cara de adentro).
-    // Sin agregar malla nueva (remesh de verdad, un cambio grande, no
-    // esta ronda), lo que SI se puede hacer es que cada trazo relaje un
-    // poco la zona tocada hacia el promedio de sus vecinos -- como un
-    // "Suavizar" chiquito mezclado en cada Empujar/Hundir/Pellizcar --
-    // asi la zona estirada se reparte mas parecido a como se rellenaria
-    // con mas malla, en vez de quedar una punta finita y aislada. No
-    // reemplaza una subdivision de verdad (el limite de "cuanta malla hay
-    // para trabajar" sigue estando ahi), pero evita que una zona muy
-    // estirada se vea rota/plegada.
-    const RELAX_AMOUNT = 0.18;
-    const adj = getAdjacency(geo);
-    const afterStroke = posAttr.array.slice();
-    for (let i = 0; i < count; i++) {
-      const w = touchedFalloff[i];
-      if (w <= 0) continue;
-      const neighbors = adj[i];
-      if (!neighbors || neighbors.size === 0) continue;
-      let ax = 0, ay = 0, az = 0;
-      neighbors.forEach(n => { ax += afterStroke[n * 3]; ay += afterStroke[n * 3 + 1]; az += afterStroke[n * 3 + 2]; });
-      const cnt = neighbors.size;
-      ax /= cnt; ay /= cnt; az /= cnt;
-      const vx = afterStroke[i * 3], vy = afterStroke[i * 3 + 1], vz = afterStroke[i * 3 + 2];
-      const k = w * RELAX_AMOUNT;
-      posAttr.setXYZ(i, vx + (ax - vx) * k, vy + (ay - vy) * k, vz + (az - vz) * k);
-    }
+    // Cada trazo relaja un poco la zona tocada hacia el promedio de sus
+    // vecinos -- como un "Suavizar" chiquito mezclado en cada pincel que
+    // estira -- asi la zona estirada se reparte mas parecido a como se
+    // rellenaria con mas malla, en vez de quedar una punta finita y
+    // aislada (ver applySculptAutoRelax, compartido con Arcilla).
+    applySculptAutoRelax(geo, posAttr, touchedFalloff, count);
   }
+
+  // Volver a pegar los vertices "duplicados a proposito" (polo/costura de
+  // UV, ver weldDuplicatePositions) ANTES de subdividir -- si el trazo los
+  // separo un poco, es aca donde hay que corregirlo, para que la
+  // Subdivision Dinamica de abajo los siga viendo como el mismo punto.
+  weldDuplicatePositions(geo);
 
   // Subdivision Dinamica (Dyntopo-lite, ver dyntopoSubdivideNearBrush mas
   // arriba): solo tiene sentido para los pinceles que ESTIRAN la malla
@@ -6911,6 +7268,12 @@ function applySculptStroke(entry, localPoint, brush, size, strength) {
   geo.computeBoundingSphere();
   entry.sculpted = true;
 
+  // Recordar este punto de contacto para el PROXIMO dab del pincel
+  // Arrastrar (ver sculptLastDragPoint mas arriba) -- se guarda pase lo
+  // que pase el pincel actual, asi cambiar de pincel a mitad de trazo no
+  // deja a Arrastrar con un punto de partida viejo/salteado.
+  sculptLastDragPoint = localPoint.clone();
+
   syncSymmetryMirrorsFor(entry.id);
 }
 
@@ -6925,6 +7288,8 @@ wrap.addEventListener('pointerdown', (e) => {
   const local = sculptRayLocalPoint(entry, e.clientX, e.clientY);
   if (!local) return; // el toque no cayo sobre la figura seleccionada -- que orbite el fondo como siempre
   sculptDragging = true;
+  sculptStrokeNormal = null; // trazo nuevo -- se vuelve a fijar en el primer dab
+  sculptLastDragPoint = null; // trazo nuevo -- el pincel Arrastrar recien tiene "de donde partir" en el 2do dab
   orbit.enabled = false;
   pendingSculptPoint = { clientX: e.clientX, clientY: e.clientY };
 }, { capture: true });
@@ -6937,6 +7302,8 @@ window.addEventListener('pointermove', (e) => {
 window.addEventListener('pointerup', () => {
   if (!sculptDragging) return;
   sculptDragging = false;
+  sculptStrokeNormal = null;
+  sculptLastDragPoint = null;
   pendingSculptPoint = null;
   orbit.enabled = true;
   pushHistory(); // guarda el estado esculpido para poder deshacerlo
@@ -6948,6 +7315,43 @@ brushRow.querySelectorAll('[data-brush]').forEach(b => {
     brushRow.querySelectorAll('[data-brush]').forEach(bb => bb.classList.toggle('active', bb === b));
   });
 });
+
+// Mostrar el valor actual al lado de Tamaño/Fuerza (pedido por Andres
+// viendo Nomad Sculpt, sept. 2026: sus sliders siempre muestran el numero,
+// no solo la posicion de la perilla). Fuerza ahora es un slider de 1 a 100
+// (en vez de 1 a 10 entero) para que se sienta mas suave/continuo al
+// arrastrarlo -- se muestra como porcentaje y se divide /10 antes de
+// pasarla a applySculptStroke, asi el rango real que usan las formulas de
+// los pinceles (1-10) no cambia, solo la resolucion del control.
+function updateBrushSizeLabel() {
+  if (brushSizeValueEl) brushSizeValueEl.textContent = parseFloat(brushSizeInput.value).toFixed(1).replace(/\.0$/, '') + ' mm';
+}
+function updateBrushStrengthLabel() {
+  if (brushStrengthValueEl) brushStrengthValueEl.textContent = Math.round(parseFloat(brushStrengthInput.value)) + '%';
+}
+if (brushSizeInput) {
+  brushSizeInput.addEventListener('input', updateBrushSizeLabel);
+  updateBrushSizeLabel();
+}
+if (brushStrengthInput) {
+  brushStrengthInput.addEventListener('input', updateBrushStrengthLabel);
+  updateBrushStrengthLabel();
+}
+
+if (densityBtn) {
+  densityBtn.addEventListener('click', () => {
+    if (selectedId == null) return;
+    const entry = sceneObjects.get(selectedId);
+    if (!entry || entry.kind === 'null') return; // un Nulo no tiene superficie para esculpir
+    const before = entry.mesh.geometry.index ? entry.mesh.geometry.index.count / 3 : 0;
+    const ok = subdivideMeshUniform(entry);
+    if (ok) {
+      const after = entry.mesh.geometry.index.count / 3;
+      showToast(`Malla más densa: ${before} → ${after} triángulos`, 'success');
+      pushHistory(); // que Ctrl+Z pueda deshacer el aumento de densidad
+    }
+  });
+}
 
 if (hairRootRadiusInput) {
   hairRootRadiusInput.addEventListener('input', () => {
@@ -7390,7 +7794,11 @@ function animate() {
     const entry = sceneObjects.get(selectedId);
     if (entry && entry.kind !== 'null') {
       const local = sculptRayLocalPoint(entry, pendingSculptPoint.clientX, pendingSculptPoint.clientY);
-      if (local) applySculptStroke(entry, local, brushType, parseFloat(brushSizeInput.value), parseFloat(brushStrengthInput.value));
+      // brushStrengthInput ahora es 1-100% en el HTML (mas suave al
+      // arrastrar) -- se reescala /10 aca para que quede en el mismo rango
+      // 1-10 que ya esperan las formulas de cada pincel en
+      // applySculptStroke (ver updateBrushStrengthLabel mas abajo).
+      if (local) applySculptStroke(entry, local, brushType, parseFloat(brushSizeInput.value), parseFloat(brushStrengthInput.value) / 10);
     }
   }
   if (hairDragging && pendingHairPoint) {
@@ -7951,3 +8359,48 @@ if (partsListCopyBtn) {
 // "Extrusion", y ahora tambien una Calcomania extruida) al mismo tiempo
 // que esta duplicada, asi que no se perdia ningun arreglo al sacarla.
 
+
+// --- Gancho temporal de QA (Grupos/Pelo + regresion Escala Progresiva /
+// Efector Aleatorio / Dyntopo, sept. 2026) -- nunca se envia al dispositivo,
+// solo a las copias de prueba en la nube (/home/claude/work3dpro y la copia
+// espejada en /mnt/user-data/uploads/3DPro para los tests que corren en el
+// puerto 8791). Superset acumulado de lo que necesitan todas las baterias
+// de Playwright de esta ronda y las anteriores.
+window.__dbg = {
+  sceneObjects,
+  THREE,
+  get selectedId() { return selectedId; },
+  set selectedId(v) { selectedId = v; },
+  get hairPoints() { return hairPoints; },
+  set hairPoints(v) { hairPoints = v; },
+  setMode,
+  finishHairStroke,
+  addPrimitive,
+  getActiveCloner,
+  updateClonerLive,
+  clonerRandomJitter,
+  pushHistory,
+  removeObject,
+  saveProjectAs,
+  rebuildSceneFrom,
+  loadProjectsMap,
+  loadProjectByName(name) {
+    const map = loadProjectsMap();
+    if (!map[name]) return false;
+    rebuildSceneFrom(map[name].data);
+    return true;
+  },
+  applySculptStroke,
+  subdivideMeshUniform,
+  cloneObjectSymmetry,
+  copySculptIfAny,
+  deepCloneSubtree,
+  DYNTOPO_MAX_TRIS,
+  createGroupFromIds,
+  groupInto,
+  ungroup,
+  moveEntryTo,
+  isDescendantOf,
+  renderLayerList,
+  get multiSelectedIds() { return multiSelectedIds; },
+};
