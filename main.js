@@ -5349,14 +5349,42 @@ function getPointerRayContext(clientX, clientY) {
   return { rect: renderer.domElement.getBoundingClientRect(), cam: activeCamera };
 }
 
+// Anillos de puntos alrededor del cursor (en pixeles de pantalla) que se
+// prueban SOLO cuando el rayo exacto por el cursor no toca la malla -- ver
+// el comentario largo dentro de sculptRayLocalPoint.
+const SCULPT_RAY_TOLERANCE_OFFSETS = [2, 4, 6, 8].flatMap(r => [
+  [r, 0], [-r, 0], [0, r], [0, -r], [r, r], [r, -r], [-r, r], [-r, -r]
+]);
+
 function sculptRayLocalPoint(entry, clientX, clientY) {
   const { rect, cam } = getPointerRayContext(clientX, clientY);
-  pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-  pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(pointer, cam);
-  const hits = raycaster.intersectObject(entry.mesh, false);
-  if (!hits.length) return null;
-  return entry.mesh.worldToLocal(hits[0].point.clone());
+  function rayAt(px, py) {
+    pointer.x = ((px - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((py - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, cam);
+    const hits = raycaster.intersectObject(entry.mesh, false);
+    return hits.length ? hits[0] : null;
+  }
+  let hit = rayAt(clientX, clientY);
+  if (!hit) {
+    // Partes esculpidas muy finas y alargadas (cuernos, orejas estiradas al
+    // maximo) pueden quedar de solo unos pocos pixeles de ancho en
+    // pantalla -- un unico rayo exacto por el pixel del cursor las puede
+    // fallar por muy poco, aunque el cursor este visualmente encima de la
+    // figura. Andres reporto no poder "agarrar" esas puntas con el pincel
+    // en absoluto (como si el puntero pasara de largo) -- sept. 2026. Antes
+    // de rendirse, se prueba con una pequena espiral de rayos alrededor del
+    // cursor (como si el pincel tuviera un nucleo mas grueso SOLO para
+    // decidir si el trazo arranca/sigue) y se usa el primero que si pegue,
+    // en anillos de radio creciente para no "saltar" a una parte lejana de
+    // la figura por error.
+    for (let i = 0; i < SCULPT_RAY_TOLERANCE_OFFSETS.length && !hit; i++) {
+      const [dx, dy] = SCULPT_RAY_TOLERANCE_OFFSETS[i];
+      hit = rayAt(clientX + dx, clientY + dy);
+    }
+  }
+  if (!hit) return null;
+  return entry.mesh.worldToLocal(hit.point.clone());
 }
 
 // Vecinos directos de cada vertice (a partir de los triangulos de la
@@ -8403,4 +8431,8 @@ window.__dbg = {
   isDescendantOf,
   renderLayerList,
   get multiSelectedIds() { return multiSelectedIds; },
+  sculptRayLocalPoint,
+  renderer,
+  perspCam,
+  scene,
 };
